@@ -164,45 +164,45 @@ class YandexDirectClient:
         return response.body
 
     def add_unified_campaign_sandbox(
-        self,
-        name: str,
-        start_date: str,
-        goal_id: int,
-        average_cpa_micros: int,
+    self,
+    name: str,
+    start_date: str,
+    goal_id: int,
+    average_cpa_micros: int,
     ) -> Dict[str, Any]:
-            """
-            Create UnifiedCampaign in sandbox with conversion-based strategy.
+        """
+        Create UnifiedCampaign in sandbox with conversion-based strategy.
 
-            Search:
-            - AVERAGE_CPA
-            Network:
-            - NETWORK_DEFAULT
-            """
-            response = self.call_v501(
-                service="campaigns",
-                method="add",
-                params={
-                    "Campaigns": [
-                        {
-                            "Name": name,
-                            "StartDate": start_date,
-                            "TimeZone": "Europe/Moscow",
-                            "UnifiedCampaign": {
-                                "BiddingStrategy": {
-                                    "Search": {
-                                        "BiddingStrategyType": "AVERAGE_CPA",
-                                        "AverageCpa": {
-                                            "GoalId": goal_id,
-                                            "AverageCpa": average_cpa_micros
-                                        }
-                                    },
-                                    "Network": {
-                                        "BiddingStrategyType": "NETWORK_DEFAULT"
+        Search:
+        - AVERAGE_CPA
+        Network:
+        - NETWORK_DEFAULT
+        """
+        response = self.call_v501(
+            service="campaigns",
+            method="add",
+            params={
+                "Campaigns": [
+                    {
+                        "Name": name,
+                        "StartDate": start_date,
+                        "TimeZone": "Europe/Moscow",
+                        "UnifiedCampaign": {
+                            "BiddingStrategy": {
+                                "Search": {
+                                    "BiddingStrategyType": "AVERAGE_CPA",
+                                    "AverageCpa": {
+                                        "GoalId": goal_id,
+                                        "AverageCpa": average_cpa_micros
                                     }
+                                },
+                                "Network": {
+                                    "BiddingStrategyType": "NETWORK_DEFAULT"
                                 }
                             }
                         }
-                    ]
-                },
-            )
-            return response.body
+                    }
+                ]
+            },
+        )
+        return response.body

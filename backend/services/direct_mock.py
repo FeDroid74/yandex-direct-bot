@@ -4,14 +4,13 @@ from typing import Dict, List, Tuple
 ALLOWED_SITE = "https://artfarfor.com"
 ALLOWED_LANGUAGE = "RU"
 ALLOWED_GOALS = {"leads", "sales"}
-ALLOWED_PLACEMENTS = {"search", "network", "both"}
-ALLOWED_STRATEGIES = {
-    "weekly_clicks_conversion_maximization",
-    "weekly_conversions_maximization",
-    "pay_per_conversion",
-    "target_cpa",
-    "target_drr",
-}
+
+# На этом этапе реальный sandbox create мы ведём только для UPC в двух плейсментах:
+# Search + NetworkDefault
+ALLOWED_PLACEMENTS = {"both"}
+
+# На этом этапе реальный create поддерживаем только как target CPA
+ALLOWED_STRATEGIES = {"target_cpa"}
 
 
 def validate_campaign(data: Dict) -> Tuple[bool, List[str]]:
@@ -27,6 +26,7 @@ def validate_campaign(data: Dict) -> Tuple[bool, List[str]]:
         "strategy_type",
         "metrica_goal_id",
         "daily_budget",
+        "target_cpa_rub",
     ]
 
     for field in required_fields:
@@ -51,7 +51,7 @@ def validate_campaign(data: Dict) -> Tuple[bool, List[str]]:
 
     placement_type = data.get("placement_type")
     if placement_type and placement_type not in ALLOWED_PLACEMENTS:
-        errors.append("placement_type must be 'search', 'network', or 'both'")
+        errors.append("placement_type must be 'both' at current real-sandbox stage")
 
     goal_type = data.get("goal_type")
     if goal_type and goal_type not in ALLOWED_GOALS:
@@ -59,7 +59,7 @@ def validate_campaign(data: Dict) -> Tuple[bool, List[str]]:
 
     strategy_type = data.get("strategy_type")
     if strategy_type and strategy_type not in ALLOWED_STRATEGIES:
-        errors.append("strategy_type must be conversion-based and allowed")
+        errors.append("strategy_type must be 'target_cpa' at current real-sandbox stage")
 
     daily_budget = data.get("daily_budget")
     if daily_budget is not None:
@@ -70,9 +70,29 @@ def validate_campaign(data: Dict) -> Tuple[bool, List[str]]:
         elif daily_budget > 30000:
             errors.append("daily_budget must be <= 30000 for auto-flow")
 
+    target_cpa_rub = data.get("target_cpa_rub")
+    if target_cpa_rub is not None:
+        if not isinstance(target_cpa_rub, (int, float)):
+            errors.append("target_cpa_rub must be a number")
+        elif target_cpa_rub <= 0:
+            errors.append("target_cpa_rub must be > 0")
+        elif target_cpa_rub > 30000:
+            errors.append("target_cpa_rub must be <= 30000 for auto-flow")
+
     metrica_goal_id = data.get("metrica_goal_id")
-    if metrica_goal_id is not None and not isinstance(metrica_goal_id, (int, str)):
-        errors.append("metrica_goal_id must be string or number")
+    if metrica_goal_id is not None:
+        if not isinstance(metrica_goal_id, (int, str)):
+            errors.append("metrica_goal_id must be string or number")
+        elif str(metrica_goal_id).strip() == "":
+            errors.append("metrica_goal_id must not be empty")
+
+    schedule = data.get("schedule")
+    if schedule is not None and not isinstance(schedule, str):
+        errors.append("schedule must be a string")
+
+    utm_tracking = data.get("utm_tracking")
+    if utm_tracking is not None and not isinstance(utm_tracking, bool):
+        errors.append("utm_tracking must be boolean")
 
     ad_groups = data.get("ad_groups")
     if ad_groups is not None and not isinstance(ad_groups, list):
@@ -86,8 +106,9 @@ def validate_campaign(data: Dict) -> Tuple[bool, List[str]]:
 
 
 def create_campaign(data: Dict) -> Dict:
-    print("=== CREATE CAMPAIGN ===")
-
+    """
+    Legacy mock create retained only as fallback helper.
+    """
     is_valid, errors = validate_campaign(data)
     if not is_valid:
         return {
@@ -95,10 +116,8 @@ def create_campaign(data: Dict) -> Dict:
             "errors": errors,
         }
 
-    campaign_id = "mock_12345"
-
     return {
         "status": "success",
-        "campaign_id": campaign_id,
+        "campaign_id": "mock_12345",
         "data": data,
     }
