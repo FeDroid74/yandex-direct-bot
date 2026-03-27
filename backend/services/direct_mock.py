@@ -5,12 +5,12 @@ ALLOWED_SITE = "https://artfarfor.com"
 ALLOWED_LANGUAGE = "RU"
 ALLOWED_GOALS = {"leads", "sales"}
 
-# На этом этапе реальный sandbox create мы ведём только для UPC в двух плейсментах:
-# Search + NetworkDefault
+# На этом этапе поддерживаем только search + network
 ALLOWED_PLACEMENTS = {"both"}
 
-# На этом этапе реальный create поддерживаем только как target CPA
-ALLOWED_STRATEGIES = {"target_cpa"}
+# Новое жёсткое правило:
+# только стратегия с оплатой за конверсии
+ALLOWED_STRATEGIES = {"pay_for_conversion"}
 
 
 def validate_campaign(data: Dict) -> Tuple[bool, List[str]]:
@@ -25,7 +25,7 @@ def validate_campaign(data: Dict) -> Tuple[bool, List[str]]:
         "goal_type",
         "strategy_type",
         "metrica_goal_id",
-        "daily_budget",
+        "weekly_budget_rub",
         "target_cpa_rub",
     ]
 
@@ -51,7 +51,7 @@ def validate_campaign(data: Dict) -> Tuple[bool, List[str]]:
 
     placement_type = data.get("placement_type")
     if placement_type and placement_type not in ALLOWED_PLACEMENTS:
-        errors.append("placement_type must be 'both' at current real-sandbox stage")
+        errors.append("placement_type must be 'both'")
 
     goal_type = data.get("goal_type")
     if goal_type and goal_type not in ALLOWED_GOALS:
@@ -59,16 +59,20 @@ def validate_campaign(data: Dict) -> Tuple[bool, List[str]]:
 
     strategy_type = data.get("strategy_type")
     if strategy_type and strategy_type not in ALLOWED_STRATEGIES:
-        errors.append("strategy_type must be 'target_cpa' at current real-sandbox stage")
+        errors.append("strategy_type must be 'pay_for_conversion'")
 
-    daily_budget = data.get("daily_budget")
-    if daily_budget is not None:
-        if not isinstance(daily_budget, (int, float)):
-            errors.append("daily_budget must be a number")
-        elif daily_budget <= 0:
-            errors.append("daily_budget must be > 0")
-        elif daily_budget > 30000:
-            errors.append("daily_budget must be <= 30000 for auto-flow")
+    # Жёстко запрещаем legacy daily budget
+    if "daily_budget" in data and data.get("daily_budget") not in ("", None):
+        errors.append("daily_budget is forbidden; use weekly_budget_rub")
+
+    weekly_budget_rub = data.get("weekly_budget_rub")
+    if weekly_budget_rub is not None:
+        if not isinstance(weekly_budget_rub, (int, float)):
+            errors.append("weekly_budget_rub must be a number")
+        elif weekly_budget_rub <= 0:
+            errors.append("weekly_budget_rub must be > 0")
+        elif weekly_budget_rub > 300000:
+            errors.append("weekly_budget_rub must be <= 300000 for auto-flow")
 
     target_cpa_rub = data.get("target_cpa_rub")
     if target_cpa_rub is not None:
@@ -78,6 +82,20 @@ def validate_campaign(data: Dict) -> Tuple[bool, List[str]]:
             errors.append("target_cpa_rub must be > 0")
         elif target_cpa_rub > 30000:
             errors.append("target_cpa_rub must be <= 30000 for auto-flow")
+
+    # Для pay for conversion в API недельный бюджет должен быть не меньше, чем CPA * 20
+    # Это правило соответствует StrategyPayForConversionAdd.WeeklySpendLimit.
+    if (
+        isinstance(weekly_budget_rub, (int, float))
+        and isinstance(target_cpa_rub, (int, float))
+        and weekly_budget_rub > 0
+        and target_cpa_rub > 0
+    ):
+        min_weekly_budget = target_cpa_rub * 20
+        if weekly_budget_rub < min_weekly_budget:
+            errors.append(
+                f"weekly_budget_rub must be >= target_cpa_rub * 20 ({min_weekly_budget})"
+            )
 
     metrica_goal_id = data.get("metrica_goal_id")
     if metrica_goal_id is not None:

@@ -6,16 +6,18 @@
 - site_url (https://artfarfor.com only)
 - region
 - language = RU
-- placement_type (search / network / both)
+- placement_type (both only)
 - goal_type (leads / sales)
-- strategy_type (conversion ONLY)
+- strategy_type = pay_for_conversion
 - metrica_goal_id
-- daily_budget
+- weekly_budget_rub
+- target_cpa_rub
 
 ---
 
 ## CAMPAIGN (необязательно в текущем backend, но желательно для дальнейшей сборки)
 
+- start_date
 - schedule
 - utm_tracking (enabled)
 - ad_groups
@@ -54,9 +56,10 @@ MUST HAVE:
 - language
 - placement_type
 - goal_type
-- strategy_type = conversion-based
+- strategy_type = pay_for_conversion
 - metrica_goal_id
-- daily_budget
+- weekly_budget_rub
+- target_cpa_rub
 
 VALIDATION SOURCE OF TRUTH:
 - backend /validate_campaign
@@ -114,6 +117,8 @@ DO NOT APPLY without confirmation (except negatives)
 - ONLY artfarfor.com
 - ONLY UPC
 - ONLY RU language
-- ONLY conversion strategies
+- ONLY pay_for_conversion strategy
+- ONLY weekly budget
+- NO daily_budget
 - NO assumptions as facts
 - ALL assumptions must be labeled

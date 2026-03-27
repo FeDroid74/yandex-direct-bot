@@ -11,9 +11,10 @@ campaign:
   language: RU
   placement_type:
   goal_type:
-  strategy_type:
+  strategy_type: pay_for_conversion
   metrica_goal_id:
-  daily_budget:
+  weekly_budget_rub:
+  target_cpa_rub:
   schedule:
   utm_tracking: true
 
