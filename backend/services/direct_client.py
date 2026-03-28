@@ -1,4 +1,6 @@
 import json
+import csv
+import io
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -157,6 +159,191 @@ class YandexDirectClient:
 
     def call(self, service: str, method: str, params: Dict[str, Any]) -> YandexDirectResponse:
         return self.call_v5(service, method, params)
+    
+    def _build_reports_headers(self) -> Dict[str, str]:
+        headers = dict(self._build_headers())
+        headers.update({
+            "processingMode": "auto",
+            "returnMoneyInMicros": "false",
+            "skipReportHeader": "true",
+            "skipColumnHeader": "false",
+            "skipReportSummary": "true",
+        })
+        return headers
+
+    def _build_reports_url(self) -> str:
+        return f"{self.base_url.rstrip('/')}/reports"
+
+    def get_campaign_stats_report(
+        self,
+        campaign_id: int,
+        date_from: str,
+        date_to: str,
+    ) -> Dict[str, Any]:
+        payload = {
+            "params": {
+                "SelectionCriteria": {
+                    "DateFrom": date_from,
+                    "DateTo": date_to,
+                    "Filter": [
+                        {
+                            "Field": "CampaignId",
+                            "Operator": "IN",
+                            "Values": [str(campaign_id)],
+                        }
+                    ],
+                },
+                "FieldNames": [
+                    "Date",
+                    "CampaignId",
+                    "Clicks",
+                    "Impressions",
+                    "Cost",
+                    "Conversions",
+                    "AvgCpc",
+                    "ConversionRate",
+                    "CostPerConversion",
+                ],
+                "OrderBy": [
+                    {
+                        "Field": "Date",
+                        "SortOrder": "ASCENDING",
+                    }
+                ],
+                "ReportName": f"campaign-stats-{campaign_id}-{date_from}-{date_to}",
+                "ReportType": "CAMPAIGN_PERFORMANCE_REPORT",
+                "DateRangeType": "CUSTOM_DATE",
+                "Format": "TSV",
+                "IncludeVAT": "YES",
+                "IncludeDiscount": "YES",
+            }
+        }
+
+        request = urllib.request.Request(
+            url=self._build_reports_url(),
+            data=json.dumps(payload).encode("utf-8"),
+            headers=self._build_reports_headers(),
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                status_code = response.getcode()
+                raw_tsv = response.read().decode("utf-8")
+
+                result: Dict[str, Any] = {
+                    "status_code": status_code,
+                    "request_id": response.headers.get("RequestId", ""),
+                    "units": response.headers.get("Units", ""),
+                    "retry_in": response.headers.get("retryIn", ""),
+                }
+
+                if status_code in (201, 202):
+                    result["report_status"] = "processing"
+                    result["rows"] = []
+                    return result
+
+                rows = list(csv.DictReader(io.StringIO(raw_tsv), delimiter="\t"))
+
+                result["report_status"] = "ready"
+                result["rows"] = rows
+                result["raw_tsv"] = raw_tsv
+                return result
+
+        except urllib.error.HTTPError as e:
+            raw_error = e.read().decode("utf-8", errors="replace")
+            try:
+                parsed_error = json.loads(raw_error) if raw_error else {}
+            except json.JSONDecodeError:
+                parsed_error = {"raw_error": raw_error}
+
+            raise YandexDirectClientError(
+                f"HTTP {e.code}: {json.dumps(parsed_error, ensure_ascii=False)}"
+            ) from e
+
+        except urllib.error.URLError as e:
+            raise YandexDirectClientError(f"Connection error: {e.reason}") from e
+        
+    def get_campaign_goal_stats_report(
+        self,
+        campaign_id: int,
+        date_from: str,
+        date_to: str,
+        goal_id: int,
+    ) -> Dict[str, Any]:
+        payload = {
+            "params": {
+                "SelectionCriteria": {
+                    "DateFrom": date_from,
+                    "DateTo": date_to,
+                    "Filter": [
+                        {
+                            "Field": "CampaignId",
+                            "Operator": "IN",
+                            "Values": [str(campaign_id)],
+                        }
+                    ],
+                },
+                "Goals": [str(goal_id)],
+                "AttributionModels": ["LC"],
+                "FieldNames": [
+                    "Date",
+                    "CampaignId",
+                    "Conversions",
+                ],
+                "ReportName": f"campaign-goal-stats-{campaign_id}-{goal_id}",
+                "ReportType": "CAMPAIGN_PERFORMANCE_REPORT",
+                "DateRangeType": "CUSTOM_DATE",
+                "Format": "TSV",
+                "IncludeVAT": "YES",
+                "IncludeDiscount": "YES",
+            }
+        }
+
+        request = urllib.request.Request(
+            url=self._build_reports_url(),
+            data=json.dumps(payload).encode("utf-8"),
+            headers=self._build_reports_headers(),
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                status_code = response.getcode()
+                raw_tsv = response.read().decode("utf-8")
+
+                result: Dict[str, Any] = {
+                    "status_code": status_code,
+                    "request_id": response.headers.get("RequestId", ""),
+                    "units": response.headers.get("Units", ""),
+                    "retry_in": response.headers.get("retryIn", ""),
+                }
+
+                if status_code in (201, 202):
+                    result["report_status"] = "processing"
+                    result["rows"] = []
+                    return result
+
+                rows = list(csv.DictReader(io.StringIO(raw_tsv), delimiter="\t"))
+
+                result["report_status"] = "ready"
+                result["rows"] = rows
+                result["raw_tsv"] = raw_tsv
+                return result
+
+        except urllib.error.HTTPError as e:
+            raw_error = e.read().decode("utf-8", errors="replace")
+            try:
+                parsed_error = json.loads(raw_error) if raw_error else {}
+            except json.JSONDecodeError:
+                parsed_error = {"raw_error": raw_error}
+
+            raise YandexDirectClientError(
+                f"HTTP {e.code}: {json.dumps(parsed_error, ensure_ascii=False)}"
+            ) from e
+
+        except urllib.error.URLError as e:
+            raise YandexDirectClientError(f"Connection error: {e.reason}") from e
 
     def ping(self) -> Dict[str, Any]:
         return {
