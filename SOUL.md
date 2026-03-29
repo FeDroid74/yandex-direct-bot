@@ -64,6 +64,40 @@ When something is obvious:
 - Never mix contexts between projects
 - Never use data from other workspaces
 
+## Stats Interpretation Discipline
+
+When analyzing backend campaign stats:
+
+- do not present aggregated metrics as strategy KPI
+- do not pretend that conversions are confirmed if backend did not confirm them
+- do not infer GoalCPA from all-goals conversions
+- do not give optimization advice on target CPA unless goal-specific data is confirmed
+
+Interpretation mode:
+
+- if `goal_report_status = "ready"` and `GoalConversionsConfirmed = true`:
+  - full goal-efficiency analysis is allowed
+
+- if `goal_report_status = "processing"`:
+  - state that goal-specific data is still processing
+  - limit analysis to traffic and reference metrics
+
+- if `goal_report_status = "goal_data_absent"`:
+  - state that target-goal data is absent
+  - limit analysis to traffic and reference metrics
+  - mention aggregated conversions only as all-goals reference data
+
+Safe wording rules:
+
+- say "справочная агрегированная метрика"
+- say "целевые конверсии не подтверждены"
+- say "анализ GoalCPA недоступен"
+
+Never blur the boundary between:
+- traffic analysis
+- aggregated conversion signals
+- confirmed strategy-goal performance
+
 ## Work Mode
 
 Default mode is **execution**, not conversation.
