@@ -529,6 +529,131 @@ class YandexDirectClient:
         )
         return response.body
 
+
+    def list_ad_groups(self, campaign_id: int) -> Dict[str, Any]:
+        response = self.call_v501(
+            service="adgroups",
+            method="get",
+            params={
+                "SelectionCriteria": {
+                    "CampaignIds": [campaign_id],
+                },
+                "FieldNames": [
+                    "Id",
+                    "Name",
+                    "CampaignId",
+                    "RegionIds",
+                    "Status",
+                    "ServingStatus",
+                    "Type",
+                ],
+            },
+        )
+        return response.body
+
+    def list_ads(self, ad_group_id: int) -> Dict[str, Any]:
+        response = self.call_v501(
+            service="ads",
+            method="get",
+            params={
+                "SelectionCriteria": {
+                    "AdGroupIds": [ad_group_id],
+                },
+                "FieldNames": [
+                    "Id",
+                    "CampaignId",
+                    "AdGroupId",
+                    "Status",
+                    "State",
+                    "StatusClarification",
+                    "Type",
+                ],
+                "TextAdFieldNames": [
+                    "Title",
+                    "Text",
+                    "Href",
+                    "DisplayUrlPath",
+                ],
+            },
+        )
+        return response.body
+
+    def add_sitelinks(
+        self,
+        sitelinks: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        response = self.call_v501(
+            service="sitelinks",
+            method="add",
+            params={
+                "SitelinksSets": [
+                    {
+                        "Sitelinks": sitelinks,
+                    }
+                ],
+            },
+        )
+        return response.body
+
+    def get_sitelinks(
+        self,
+        ids: Optional[List[int]] = None,
+        sitelink_field_names: Optional[List[str]] = None,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {}
+
+        if ids is not None:
+            params["SelectionCriteria"] = {
+                "Ids": ids,
+            }
+
+        if sitelink_field_names:
+            params["FieldNames"] = ["Id"]
+            params["SitelinkFieldNames"] = sitelink_field_names
+        else:
+            params["FieldNames"] = ["Id", "Sitelinks"]
+
+        if limit is not None or offset is not None:
+            page: Dict[str, int] = {}
+            if limit is not None:
+                page["Limit"] = limit
+            if offset is not None:
+                page["Offset"] = offset
+            params["Page"] = page
+
+        response = self.call_v501(
+            service="sitelinks",
+            method="get",
+            params=params,
+        )
+        return response.body
+
+    def suspend_ads(self, ad_ids: List[int]) -> Dict[str, Any]:
+        response = self.call_v501(
+            service="ads",
+            method="suspend",
+            params={
+                "SelectionCriteria": {
+                    "Ids": ad_ids,
+                },
+            },
+        )
+        return response.body
+
+    def delete_ads(self, ad_ids: List[int]) -> Dict[str, Any]:
+        response = self.call_v501(
+            service="ads",
+            method="delete",
+            params={
+                "SelectionCriteria": {
+                    "Ids": ad_ids,
+                },
+            },
+        )
+        return response.body
+
     def add_unified_campaign(
         self,
         name: str,
@@ -679,6 +804,7 @@ class YandexDirectClient:
         text: str,
         href: str,
         display_url_path: Optional[str] = None,
+        sitelink_set_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         ad_item: Dict[str, Any] = {
             "AdGroupId": ad_group_id,
@@ -691,6 +817,9 @@ class YandexDirectClient:
 
         if display_url_path:
             ad_item["TextAd"]["DisplayUrlPath"] = display_url_path
+
+        if sitelink_set_id is not None:
+            ad_item["TextAd"]["SitelinkSetId"] = sitelink_set_id
 
         response = self.call_v501(
             service="ads",
@@ -708,6 +837,7 @@ class YandexDirectClient:
         text: str,
         href: str,
         display_url_path: Optional[str] = None,
+        sitelink_set_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         return self.add_text_ad(
             ad_group_id=ad_group_id,
@@ -715,6 +845,7 @@ class YandexDirectClient:
             text=text,
             href=href,
             display_url_path=display_url_path,
+            sitelink_set_id=sitelink_set_id,
         )
 
     def add_text_ad_production(
@@ -724,6 +855,7 @@ class YandexDirectClient:
         text: str,
         href: str,
         display_url_path: Optional[str] = None,
+        sitelink_set_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         return self.add_text_ad(
             ad_group_id=ad_group_id,
@@ -731,6 +863,7 @@ class YandexDirectClient:
             text=text,
             href=href,
             display_url_path=display_url_path,
+            sitelink_set_id=sitelink_set_id,
         )
 
     def moderate_ads(self, ad_ids: List[int]) -> Dict[str, Any]:

@@ -282,6 +282,54 @@ def parse_update_result(result: dict, entity_name: str) -> dict:
     }
 
 
+def parse_action_results(result: dict, result_key: str, entity_name: str, action_name: str) -> dict:
+    action_results = result.get("result", {}).get(result_key, [])
+    if not action_results:
+        return {
+            "ok": False,
+            "status": 502,
+            "payload": {
+                "status": "error",
+                "message": f"empty {result_key} from Yandex Direct for {entity_name} {action_name}",
+                "raw": result,
+            },
+        }
+
+    items = []
+    has_errors = False
+
+    for item in action_results:
+        payload_item = {
+            "id": str(item.get("Id")),
+            "warnings": item.get("Warnings", []),
+            "errors": item.get("Errors", []),
+        }
+        if payload_item["errors"]:
+            has_errors = True
+        items.append(payload_item)
+
+    if has_errors:
+        return {
+            "ok": False,
+            "status": 400,
+            "payload": {
+                "status": "error",
+                "message": f"Yandex Direct rejected {entity_name} {action_name}",
+                "results": items,
+                "raw": result,
+            },
+        }
+
+    return {
+        "ok": True,
+        "status": 200,
+        "payload": {
+            "status": "success",
+            "results": items,
+        },
+    }
+
+
 def extract_current_upc_strategy(campaign: dict) -> dict:
     bidding_strategy = campaign.get("UnifiedCampaign", {}).get("BiddingStrategy", {})
     pay_for_conversion = bidding_strategy.get("Search", {}).get("PayForConversion", {})
@@ -843,6 +891,78 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if self.path == "/list_ad_groups":
+            target = resolve_target(data)
+            if target not in ALLOWED_TARGETS:
+                self._send_json({"status": "error", "message": "target must be 'sandbox' or 'production'"}, 400)
+                return
+
+            campaign_id = normalize_campaign_id(data.get("campaign_id"))
+            if campaign_id is None:
+                self._send_json({"status": "error", "message": "campaign_id must be a positive integer or numeric string"}, 400)
+                return
+
+            client = YandexDirectClient.for_target(target)
+
+            try:
+                campaign_result = client.get_campaign_details(campaign_id)
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": target, "campaign_id": str(campaign_id)},
+                    502,
+                )
+                return
+
+            campaigns = campaign_result.get("result", {}).get("Campaigns", [])
+            if not campaigns:
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": "campaign not found",
+                        "target": target,
+                        "campaign_id": str(campaign_id),
+                        "raw": campaign_result,
+                    },
+                    404,
+                )
+                return
+
+            try:
+                result = client.list_ad_groups(campaign_id)
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": target, "campaign_id": str(campaign_id)},
+                    502,
+                )
+                return
+
+            raw_ad_groups = result.get("result", {}).get("AdGroups", [])
+            ad_groups = []
+
+            for ad_group in raw_ad_groups:
+                ad_groups.append(
+                    {
+                        "id": str(ad_group.get("Id")),
+                        "name": ad_group.get("Name"),
+                        "campaign_id": str(ad_group.get("CampaignId")),
+                        "region_ids": ad_group.get("RegionIds", []),
+                        "status": ad_group.get("Status"),
+                        "serving_status": ad_group.get("ServingStatus"),
+                        "type": ad_group.get("Type"),
+                    }
+                )
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "target": target,
+                    "campaign_id": str(campaign_id),
+                    "ad_groups": ad_groups,
+                },
+                200,
+            )
+            return
+
         if self.path == "/create_ad":
             target = resolve_target(data)
             if target not in ALLOWED_TARGETS:
@@ -876,6 +996,13 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 display_url_path = display_url_path.strip()
 
+            sitelink_set_id = None
+            if "sitelink_set_id" in data:
+                sitelink_set_id = normalize_positive_int_id(data.get("sitelink_set_id"))
+                if sitelink_set_id is None:
+                    self._send_json({"status": "error", "message": "sitelink_set_id must be a positive integer or numeric string when provided"}, 400)
+                    return
+
             confirm = resolve_confirm(data)
             if target == "production" and not confirm:
                 self._send_json(
@@ -894,6 +1021,7 @@ class Handler(BaseHTTPRequestHandler):
                         text=text.strip(),
                         href=href.strip(),
                         display_url_path=display_url_path,
+                        sitelink_set_id=sitelink_set_id,
                     )
                 else:
                     result = client.add_text_ad_production(
@@ -902,6 +1030,7 @@ class Handler(BaseHTTPRequestHandler):
                         text=text.strip(),
                         href=href.strip(),
                         display_url_path=display_url_path,
+                        sitelink_set_id=sitelink_set_id,
                     )
             except YandexDirectClientError as e:
                 self._send_json(
@@ -964,6 +1093,205 @@ class Handler(BaseHTTPRequestHandler):
 
             self._send_json(
                 {"status": "success", "target": target, "ad_id": str(ad_id), "ad": ad},
+                200,
+            )
+            return
+
+        if self.path == "/list_ads":
+            target = resolve_target(data)
+            if target not in ALLOWED_TARGETS:
+                self._send_json({"status": "error", "message": "target must be 'sandbox' or 'production'"}, 400)
+                return
+
+            ad_group_id = normalize_ad_group_id(data.get("ad_group_id"))
+            if ad_group_id is None:
+                self._send_json({"status": "error", "message": "ad_group_id must be a positive integer or numeric string"}, 400)
+                return
+
+            client = YandexDirectClient.for_target(target)
+
+            try:
+                ad_group_result = client.get_ad_group_details(ad_group_id)
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": target, "ad_group_id": str(ad_group_id)},
+                    502,
+                )
+                return
+
+            ad_groups = ad_group_result.get("result", {}).get("AdGroups", [])
+            if not ad_groups:
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": "ad_group not found",
+                        "target": target,
+                        "ad_group_id": str(ad_group_id),
+                        "raw": ad_group_result,
+                    },
+                    404,
+                )
+                return
+
+            try:
+                result = client.list_ads(ad_group_id)
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": target, "ad_group_id": str(ad_group_id)},
+                    502,
+                )
+                return
+
+            raw_ads = result.get("result", {}).get("Ads", [])
+            ads = []
+
+            for ad in raw_ads:
+                text_ad = ad.get("TextAd", {})
+                ads.append(
+                    {
+                        "id": str(ad.get("Id")),
+                        "campaign_id": str(ad.get("CampaignId")),
+                        "ad_group_id": str(ad.get("AdGroupId")),
+                        "status": ad.get("Status"),
+                        "state": ad.get("State"),
+                        "status_clarification": ad.get("StatusClarification"),
+                        "type": ad.get("Type"),
+                        "title": text_ad.get("Title"),
+                        "text": text_ad.get("Text"),
+                        "href": text_ad.get("Href"),
+                        "display_url_path": text_ad.get("DisplayUrlPath"),
+                    }
+                )
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "target": target,
+                    "ad_group_id": str(ad_group_id),
+                    "ads": ads,
+                },
+                200,
+            )
+            return
+
+        if self.path == "/disable_ads":
+            target = resolve_target(data)
+            if target not in ALLOWED_TARGETS:
+                self._send_json({"status": "error", "message": "target must be 'sandbox' or 'production'"}, 400)
+                return
+
+            raw_ad_ids = data.get("ad_ids")
+            if not isinstance(raw_ad_ids, list) or not raw_ad_ids:
+                self._send_json({"status": "error", "message": "ad_ids must be a non-empty array of positive integers or numeric strings"}, 400)
+                return
+
+            normalized_ad_ids = []
+            for item in raw_ad_ids:
+                normalized = normalize_ad_id(item)
+                if normalized is None:
+                    self._send_json(
+                        {"status": "error", "message": "each ad_id must be a positive integer or numeric string"},
+                        400,
+                    )
+                    return
+                normalized_ad_ids.append(normalized)
+
+            confirm = resolve_confirm(data)
+            if target == "production" and not confirm:
+                self._send_json(
+                    {"status": "error", "message": "production ads disable requires explicit confirm=true", "target": "production"},
+                    400,
+                )
+                return
+
+            client = YandexDirectClient.for_target(target)
+
+            try:
+                result = client.suspend_ads(normalized_ad_ids)
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": target, "ad_ids": [str(ad_id) for ad_id in normalized_ad_ids]},
+                    502,
+                )
+                return
+
+            parsed = parse_action_results(result, "SuspendResults", "ads", "disable")
+            if not parsed["ok"]:
+                payload = parsed["payload"]
+                payload["target"] = target
+                payload["ad_ids"] = [str(ad_id) for ad_id in normalized_ad_ids]
+                self._send_json(payload, parsed["status"])
+                return
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "target": target,
+                    "ad_ids": [str(ad_id) for ad_id in normalized_ad_ids],
+                    "results": parsed["payload"]["results"],
+                    "raw": result,
+                },
+                200,
+            )
+            return
+
+        if self.path == "/delete_ads":
+            target = resolve_target(data)
+            if target not in ALLOWED_TARGETS:
+                self._send_json({"status": "error", "message": "target must be 'sandbox' or 'production'"}, 400)
+                return
+
+            raw_ad_ids = data.get("ad_ids")
+            if not isinstance(raw_ad_ids, list) or not raw_ad_ids:
+                self._send_json({"status": "error", "message": "ad_ids must be a non-empty array of positive integers or numeric strings"}, 400)
+                return
+
+            normalized_ad_ids = []
+            for item in raw_ad_ids:
+                normalized = normalize_ad_id(item)
+                if normalized is None:
+                    self._send_json(
+                        {"status": "error", "message": "each ad_id must be a positive integer or numeric string"},
+                        400,
+                    )
+                    return
+                normalized_ad_ids.append(normalized)
+
+            confirm = resolve_confirm(data)
+            if target == "production" and not confirm:
+                self._send_json(
+                    {"status": "error", "message": "production ads delete requires explicit confirm=true", "target": "production"},
+                    400,
+                )
+                return
+
+            client = YandexDirectClient.for_target(target)
+
+            try:
+                result = client.delete_ads(normalized_ad_ids)
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": target, "ad_ids": [str(ad_id) for ad_id in normalized_ad_ids]},
+                    502,
+                )
+                return
+
+            parsed = parse_action_results(result, "DeleteResults", "ads", "delete")
+            if not parsed["ok"]:
+                payload = parsed["payload"]
+                payload["target"] = target
+                payload["ad_ids"] = [str(ad_id) for ad_id in normalized_ad_ids]
+                self._send_json(payload, parsed["status"])
+                return
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "target": target,
+                    "ad_ids": [str(ad_id) for ad_id in normalized_ad_ids],
+                    "results": parsed["payload"]["results"],
+                    "raw": result,
+                },
                 200,
             )
             return
