@@ -387,6 +387,8 @@ class YandexDirectClient:
                     "BiddingStrategy",
                     "CounterIds",
                     "Settings",
+                    "TrackingParams",
+                    "NegativeKeywordSharedSetIds",
                 ],
                 "UnifiedCampaignSearchStrategyPlacementTypesFieldNames": [
                     "SearchResults",
@@ -481,6 +483,64 @@ class YandexDirectClient:
             weekly_budget_micros=weekly_budget_micros,
         )
 
+    def update_campaign_negative_keyword_shared_set_ids(
+        self,
+        campaign_id: int,
+        shared_set_ids: List[int],
+    ) -> Dict[str, Any]:
+        response = self.call_v501(
+            service="campaigns",
+            method="update",
+            params={
+                "Campaigns": [
+                    {
+                        "Id": campaign_id,
+                        "UnifiedCampaign": {
+                            "NegativeKeywordSharedSetIds": {
+                                "Items": shared_set_ids,
+                            }
+                        },
+                    }
+                ]
+            },
+        )
+        return response.body
+
+    def update_campaign_tracking_params(
+        self,
+        campaign_id: int,
+        tracking_params: str,
+        counter_ids: Optional[List[int]] = None,
+        negative_keyword_shared_set_ids: Optional[List[int]] = None,
+    ) -> Dict[str, Any]:
+        unified_campaign: Dict[str, Any] = {
+            "TrackingParams": tracking_params,
+        }
+
+        if counter_ids is not None:
+            unified_campaign["CounterIds"] = {
+                "Items": counter_ids,
+            }
+
+        if negative_keyword_shared_set_ids is not None:
+            unified_campaign["NegativeKeywordSharedSetIds"] = {
+                "Items": negative_keyword_shared_set_ids,
+            }
+
+        response = self.call_v501(
+            service="campaigns",
+            method="update",
+            params={
+                "Campaigns": [
+                    {
+                        "Id": campaign_id,
+                        "UnifiedCampaign": unified_campaign,
+                    }
+                ]
+            },
+        )
+        return response.body
+
     def get_ad_group_details(self, ad_group_id: int) -> Dict[str, Any]:
         response = self.call_v501(
             service="adgroups",
@@ -497,6 +557,62 @@ class YandexDirectClient:
                     "Status",
                     "ServingStatus",
                     "Type",
+                ],
+            },
+        )
+        return response.body
+
+    def get_autotargeting_keywords(self, ad_group_id: int) -> Dict[str, Any]:
+        response = self.call_v501(
+            service="keywords",
+            method="get",
+            params={
+                "SelectionCriteria": {
+                    "AdGroupIds": [ad_group_id],
+                },
+                "FieldNames": [
+                    "Id",
+                    "Keyword",
+                    "State",
+                    "Status",
+                    "ServingStatus",
+                    "AdGroupId",
+                    "CampaignId",
+                    "Bid",
+                    "AutotargetingSearchBidIsAuto",
+                    "ContextBid",
+                    "StrategyPriority",
+                ],
+                "AutotargetingSettingsCategoriesFieldNames": [
+                    "Exact",
+                    "Narrow",
+                    "Alternative",
+                    "Accessory",
+                    "Broader",
+                ],
+                "AutotargetingSettingsBrandOptionsFieldNames": [
+                    "WithoutBrands",
+                    "WithAdvertiserBrand",
+                    "WithCompetitorsBrand",
+                ],
+            },
+        )
+        return response.body
+
+    def update_autotargeting_settings(
+        self,
+        autotargeting_id: int,
+        autotargeting_settings: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        response = self.call_v501(
+            service="keywords",
+            method="update",
+            params={
+                "Keywords": [
+                    {
+                        "Id": autotargeting_id,
+                        "AutotargetingSettings": autotargeting_settings,
+                    }
                 ],
             },
         )
@@ -524,6 +640,9 @@ class YandexDirectClient:
                     "Text",
                     "Href",
                     "DisplayUrlPath",
+                    "AdImageHash",
+                    "AdImageModeration",
+                    "SitelinkSetId",
                 ],
             },
         )
@@ -573,6 +692,9 @@ class YandexDirectClient:
                     "Text",
                     "Href",
                     "DisplayUrlPath",
+                    "AdImageHash",
+                    "AdImageModeration",
+                    "SitelinkSetId",
                 ],
             },
         )
@@ -592,6 +714,53 @@ class YandexDirectClient:
                     }
                 ],
             },
+        )
+        return response.body
+
+    def add_ad_image(
+        self,
+        name: str,
+        image_data_base64: str,
+    ) -> Dict[str, Any]:
+        response = self.call_v501(
+            service="adimages",
+            method="add",
+            params={
+                "AdImages": [
+                    {
+                        "ImageData": image_data_base64,
+                        "Name": name,
+                    }
+                ],
+            },
+        )
+        return response.body
+
+    def get_ad_images(
+        self,
+        ad_image_hashes: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
+            "FieldNames": [
+                "AdImageHash",
+                "Name",
+                "Associated",
+                "Type",
+                "Subtype",
+                "OriginalUrl",
+                "PreviewUrl",
+            ],
+        }
+
+        if ad_image_hashes is not None:
+            params["SelectionCriteria"] = {
+                "AdImageHashes": ad_image_hashes,
+            }
+
+        response = self.call_v501(
+            service="adimages",
+            method="get",
+            params=params,
         )
         return response.body
 
@@ -630,6 +799,56 @@ class YandexDirectClient:
         )
         return response.body
 
+    def add_negative_keyword_shared_set(
+        self,
+        name: str,
+        negative_keywords: List[str],
+    ) -> Dict[str, Any]:
+        response = self.call_v501(
+            service="negativekeywordsharedsets",
+            method="add",
+            params={
+                "NegativeKeywordSharedSets": [
+                    {
+                        "Name": name,
+                        "NegativeKeywords": negative_keywords,
+                    }
+                ],
+            },
+        )
+        return response.body
+
+    def get_negative_keyword_shared_sets(
+        self,
+        ids: Optional[List[int]] = None,
+        field_names: Optional[List[str]] = None,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
+            "FieldNames": field_names or ["Id", "Name", "NegativeKeywords", "Associated"],
+        }
+
+        if ids is not None:
+            params["SelectionCriteria"] = {
+                "Ids": ids,
+            }
+
+        if limit is not None or offset is not None:
+            page: Dict[str, int] = {}
+            if limit is not None:
+                page["Limit"] = limit
+            if offset is not None:
+                page["Offset"] = offset
+            params["Page"] = page
+
+        response = self.call_v501(
+            service="negativekeywordsharedsets",
+            method="get",
+            params=params,
+        )
+        return response.body
+
     def suspend_ads(self, ad_ids: List[int]) -> Dict[str, Any]:
         response = self.call_v501(
             service="ads",
@@ -662,37 +881,43 @@ class YandexDirectClient:
         cpa_micros: int,
         weekly_budget_micros: int,
         counter_id: int = DEFAULT_METRICA_COUNTER_ID,
+        tracking_params: Optional[str] = None,
     ) -> Dict[str, Any]:
+        campaign_item: Dict[str, Any] = {
+            "Name": name,
+            "StartDate": start_date,
+            "TimeZone": "Europe/Moscow",
+            "UnifiedCampaign": {
+                "CounterIds": {
+                    "Items": [counter_id],
+                },
+                "BiddingStrategy": {
+                    "Search": {
+                        "BiddingStrategyType": "PAY_FOR_CONVERSION",
+                        "PlacementTypes": dict(self.DEFAULT_SEARCH_PLACEMENT_TYPES),
+                        "PayForConversion": {
+                            "GoalId": goal_id,
+                            "Cpa": cpa_micros,
+                            "WeeklySpendLimit": weekly_budget_micros,
+                        },
+                    },
+                    "Network": {
+                        "BiddingStrategyType": "NETWORK_DEFAULT",
+                        "PlacementTypes": dict(self.DEFAULT_NETWORK_PLACEMENT_TYPES),
+                    },
+                },
+            },
+        }
+
+        if tracking_params is not None:
+            campaign_item["UnifiedCampaign"]["TrackingParams"] = tracking_params
+
         response = self.call_v501(
             service="campaigns",
             method="add",
             params={
                 "Campaigns": [
-                    {
-                        "Name": name,
-                        "StartDate": start_date,
-                        "TimeZone": "Europe/Moscow",
-                        "UnifiedCampaign": {
-                            "CounterIds": {
-                                "Items": [counter_id],
-                            },
-                            "BiddingStrategy": {
-                                "Search": {
-                                    "BiddingStrategyType": "PAY_FOR_CONVERSION",
-                                    "PlacementTypes": dict(self.DEFAULT_SEARCH_PLACEMENT_TYPES),
-                                    "PayForConversion": {
-                                        "GoalId": goal_id,
-                                        "Cpa": cpa_micros,
-                                        "WeeklySpendLimit": weekly_budget_micros,
-                                    },
-                                },
-                                "Network": {
-                                    "BiddingStrategyType": "NETWORK_DEFAULT",
-                                    "PlacementTypes": dict(self.DEFAULT_NETWORK_PLACEMENT_TYPES),
-                                },
-                            },
-                        },
-                    }
+                    campaign_item
                 ]
             },
         )
@@ -706,6 +931,7 @@ class YandexDirectClient:
         cpa_micros: int,
         weekly_budget_micros: int,
         counter_id: int = DEFAULT_METRICA_COUNTER_ID,
+        tracking_params: Optional[str] = None,
     ) -> Dict[str, Any]:
         return self.add_unified_campaign(
             name=name,
@@ -714,6 +940,7 @@ class YandexDirectClient:
             cpa_micros=cpa_micros,
             weekly_budget_micros=weekly_budget_micros,
             counter_id=counter_id,
+            tracking_params=tracking_params,
         )
 
     def add_unified_campaign_production(
@@ -724,6 +951,7 @@ class YandexDirectClient:
         cpa_micros: int,
         weekly_budget_micros: int,
         counter_id: int = DEFAULT_METRICA_COUNTER_ID,
+        tracking_params: Optional[str] = None,
     ) -> Dict[str, Any]:
         return self.add_unified_campaign(
             name=name,
@@ -732,6 +960,7 @@ class YandexDirectClient:
             cpa_micros=cpa_micros,
             weekly_budget_micros=weekly_budget_micros,
             counter_id=counter_id,
+            tracking_params=tracking_params,
         )
 
     def add_unified_ad_group(
@@ -804,6 +1033,7 @@ class YandexDirectClient:
         text: str,
         href: str,
         display_url_path: Optional[str] = None,
+        ad_image_hash: Optional[str] = None,
         sitelink_set_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         ad_item: Dict[str, Any] = {
@@ -818,8 +1048,15 @@ class YandexDirectClient:
         if display_url_path:
             ad_item["TextAd"]["DisplayUrlPath"] = display_url_path
 
+        if ad_image_hash is not None:
+            ad_item["TextAd"]["AdImageHash"] = ad_image_hash
+
         if sitelink_set_id is not None:
             ad_item["TextAd"]["SitelinkSetId"] = sitelink_set_id
+
+        print("DEBUG ADS PARAMS:", json.dumps({
+            "Ads": [ad_item],
+        }, ensure_ascii=False, indent=2))
 
         response = self.call_v501(
             service="ads",
@@ -837,6 +1074,7 @@ class YandexDirectClient:
         text: str,
         href: str,
         display_url_path: Optional[str] = None,
+        ad_image_hash: Optional[str] = None,
         sitelink_set_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         return self.add_text_ad(
@@ -845,6 +1083,7 @@ class YandexDirectClient:
             text=text,
             href=href,
             display_url_path=display_url_path,
+            ad_image_hash=ad_image_hash,
             sitelink_set_id=sitelink_set_id,
         )
 
@@ -855,6 +1094,7 @@ class YandexDirectClient:
         text: str,
         href: str,
         display_url_path: Optional[str] = None,
+        ad_image_hash: Optional[str] = None,
         sitelink_set_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         return self.add_text_ad(
@@ -863,8 +1103,36 @@ class YandexDirectClient:
             text=text,
             href=href,
             display_url_path=display_url_path,
+            ad_image_hash=ad_image_hash,
             sitelink_set_id=sitelink_set_id,
         )
+
+    def update_text_ad_image(
+        self,
+        ad_id: int,
+        ad_image_hash: Optional[str] = None,
+        remove: bool = False,
+    ) -> Dict[str, Any]:
+        if not remove and ad_image_hash is None:
+            raise YandexDirectClientError(
+                "ad_image_hash must be provided unless remove=True"
+            )
+
+        response = self.call_v501(
+            service="ads",
+            method="update",
+            params={
+                "Ads": [
+                    {
+                        "Id": ad_id,
+                        "TextAd": {
+                            "AdImageHash": None if remove else ad_image_hash,
+                        },
+                    }
+                ],
+            },
+        )
+        return response.body
 
     def moderate_ads(self, ad_ids: List[int]) -> Dict[str, Any]:
         response = self.call_v501(

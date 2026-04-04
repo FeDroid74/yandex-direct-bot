@@ -1,52 +1,129 @@
-# STATE.md — Campaign State
+# STATE.md - Campaign Draft State
 
-You are building a structured campaign object.
+## Session Modes
 
-Store all collected data here:
+- draft_campaign
+- review_draft
+- analyze_campaign
+- awaiting_confirm_create
+- awaiting_confirm_update
 
-campaign:
-  campaign_name:
-  site_url:
-  region:
-  language: RU
-  placement_type:
-  goal_type:
-  strategy_type: pay_for_conversion
-  metrica_goal_id:
-  weekly_budget_rub:
-  target_cpa_rub:
-  schedule:
-  utm_tracking: true
+## Current State
 
-  product:
-  audience:
-  value:
-
-  ad_groups: []
-  ads: []
-
----
-
-## Rules
-
-- Always remember previous answers
-- Never ask the same question twice
-- Fill missing fields step-by-step
-- Do not proceed if critical fields are missing
-- Use backend validation as the source of truth before create
-
----
-
-## Behavior
-
-You are filling this structure gradually.
-
-Each user answer updates STATE.
-
-Before next question:
-- check what is already filled
-- ask ONLY for one missing field
-- if full payload is already provided, call validate_campaign first
-- do not invent validation failures manually
-- validate critical campaign fields through backend before create
-- never call create_campaign without explicit user confirmation
+```json
+{
+  "session_mode": "review_draft",
+  "draft_campaign": {
+    "campaign_type": "UNIFIED_CAMPAIGN",
+    "campaign_name": "фарфоровые подарки | Approved",
+    "site_url": "https://artfarfor.com",
+    "region": "RU",
+    "language": "RU",
+    "placement_type": "both",
+    "goal_type": "leads",
+    "strategy_type": "pay_for_conversion",
+    "metrica_goal_id": 352606262,
+    "metrica_counter_id": 99041859,
+    "weekly_budget_rub": 10000,
+    "target_cpa_rub": 500,
+    "tracking_params": "utm_source=yandex&utm_medium=cpc&utm_campaign={campaign_id}&utm_content={ad_id}&utm_term={keyword}",
+    "utm_tracking": true,
+    "negative_keywords": [
+      "оптом",
+      "б/у"
+    ],
+    "sitelinks": [
+      {
+        "title": "Каталог",
+        "href": "https://artfarfor.com"
+      },
+      {
+        "title": "Коллекции",
+        "href": "https://artfarfor.com"
+      }
+    ],
+    "ad_groups": [
+      {
+        "group_name": "фарфоровые подарки",
+        "negative_keywords": [],
+        "autotargeting_settings": {
+          "Categories": {
+            "Exact": "YES",
+            "Narrow": "YES",
+            "Alternative": "YES",
+            "Accessory": "YES",
+            "Broader": "YES"
+          },
+          "BrandOptions": {
+            "WithoutBrands": "YES",
+            "WithAdvertiserBrand": "YES",
+            "WithCompetitorsBrand": "NO"
+          }
+        },
+        "ads": [
+          {
+            "title": "фарфоровые подарки | ArtFarfor",
+            "text": "Авторские фарфоровые статуэтки и подарки ручной работы",
+            "final_url": "https://artfarfor.com"
+          }
+        ]
+      }
+    ],
+    "ads": [
+      {
+        "title": "фарфоровые подарки | ArtFarfor",
+        "text": "Подарочные фарфоровые статуэтки ручной работы",
+        "final_url": "https://artfarfor.com"
+      }
+    ],
+    "autotargeting_settings": {
+      "Categories": {
+        "Exact": "YES",
+        "Narrow": "YES",
+        "Alternative": "YES",
+        "Accessory": "YES",
+        "Broader": "YES"
+      },
+      "BrandOptions": {
+        "WithoutBrands": "YES",
+        "WithAdvertiserBrand": "YES",
+        "WithCompetitorsBrand": "NO"
+      }
+    },
+    "assumptions": [
+      "Assumption: used fixed site_url https://artfarfor.com per project restriction.",
+      "Assumption: region='RU' and goal_type='leads' are draft defaults for backend validate/create flow and require review.",
+      "Assumption: used RU, both placements, pay_for_conversion, metrica_goal_id 352606262 per confirmed project constraints.",
+      "Assumption: weekly_budget_rub=10000 and target_cpa_rub=500 are draft defaults and require review.",
+      "Assumption: sitelinks and negative keywords are prototype placeholders for review_draft."
+    ]
+  },
+  "campaign_payload": null,
+  "validation_result": null,
+  "created_campaign_id": null,
+  "last_plan": null,
+  "last_proposal": null,
+  "proposal_history": [],
+  "approved_patterns": {
+    "negative_keywords_defaults": [
+      "оптом",
+      "б/у"
+    ],
+    "sitelinks_defaults": null,
+    "autotargeting_defaults": null,
+    "campaign_name_suffix": " | Approved",
+    "budget_defaults": null
+  },
+  "draft_meta": {
+    "version": "v1",
+    "last_action": "draft_campaign_from_theme",
+    "theme": "фарфоровые подарки",
+    "revision_count": 0,
+    "supported_revision_rules": [
+      "измени название кампании на X",
+      "добавь группу X",
+      "добавь минус-слово X"
+    ]
+  }
+}
+```

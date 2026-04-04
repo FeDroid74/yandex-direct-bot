@@ -1,6 +1,9 @@
-from datetime import date, timedelta
+import base64
+import binascii
+from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
+import os
 from typing import Optional
 
 from config import settings
@@ -10,8 +13,22 @@ from services.direct_mock import validate_campaign
 
 ALLOWED_TARGETS = {"sandbox", "production"}
 ALLOWED_OFFER_RETARGETING = {"YES", "NO"}
+ALLOWED_AUTOTARGETING_SETTINGS_VALUES = {"YES", "NO"}
+ALLOWED_AUTOTARGETING_CATEGORY_KEYS = {"Exact", "Narrow", "Alternative", "Accessory", "Broader"}
+ALLOWED_AUTOTARGETING_BRAND_OPTION_KEYS = {"WithoutBrands", "WithAdvertiserBrand", "WithCompetitorsBrand"}
 DEFAULT_METRICA_COUNTER_ID = 99041859
 DEFAULT_GOAL_ID = 352606262
+STATE_FILE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "STATE.md"))
+SUPPORTED_SESSION_MODES = [
+    "draft_campaign",
+    "review_draft",
+    "analyze_campaign",
+    "awaiting_confirm_create",
+    "awaiting_confirm_update",
+]
+DEFAULT_DRAFT_TRACKING_PARAMS = (
+    "utm_source=yandex&utm_medium=cpc&utm_campaign={campaign_id}&utm_content={ad_id}&utm_term={keyword}"
+)
 
 
 def rub_to_micros(value_rub: float) -> int:
@@ -20,6 +37,13 @@ def rub_to_micros(value_rub: float) -> int:
 
 def micros_to_rub(value_micros: int) -> float:
     return float(value_micros) / 1_000_000
+
+
+def format_rub_value(value):
+    numeric = float(value)
+    if numeric.is_integer():
+        return int(numeric)
+    return numeric
 
 
 def resolve_start_date(payload: dict) -> str:
@@ -78,6 +102,17 @@ def normalize_ad_group_id(value):
 
 def normalize_ad_id(value):
     return normalize_positive_int_id(value)
+
+
+def normalize_non_empty_string(value) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+
+    stripped = value.strip()
+    if not stripped:
+        return None
+
+    return stripped
 
 
 def normalize_positive_number(value) -> Optional[float]:
@@ -200,6 +235,452 @@ def normalize_negative_keywords(value):
     return result
 
 
+def normalize_autotargeting_settings(value):
+    if not isinstance(value, dict):
+        return None
+
+    normalized = {}
+
+    if "Categories" in value:
+        categories = value.get("Categories")
+        if not isinstance(categories, dict) or not categories:
+            return None
+
+        normalized_categories = {}
+        for key, raw_setting_value in categories.items():
+            if key not in ALLOWED_AUTOTARGETING_CATEGORY_KEYS:
+                return None
+            if not isinstance(raw_setting_value, str):
+                return None
+            setting_value = raw_setting_value.strip().upper()
+            if setting_value not in ALLOWED_AUTOTARGETING_SETTINGS_VALUES:
+                return None
+            normalized_categories[key] = setting_value
+
+        normalized["Categories"] = normalized_categories
+
+    if "BrandOptions" in value:
+        brand_options = value.get("BrandOptions")
+        if not isinstance(brand_options, dict) or not brand_options:
+            return None
+
+        normalized_brand_options = {}
+        for key, raw_setting_value in brand_options.items():
+            if key not in ALLOWED_AUTOTARGETING_BRAND_OPTION_KEYS:
+                return None
+            if not isinstance(raw_setting_value, str):
+                return None
+            setting_value = raw_setting_value.strip().upper()
+            if setting_value not in ALLOWED_AUTOTARGETING_SETTINGS_VALUES:
+                return None
+            normalized_brand_options[key] = setting_value
+
+        normalized["BrandOptions"] = normalized_brand_options
+
+    if not normalized:
+        return None
+
+    return normalized
+
+
+def deep_copy_json(value):
+    return json.loads(json.dumps(value, ensure_ascii=False))
+
+
+def build_default_approved_patterns() -> dict:
+    return {
+        "negative_keywords_defaults": None,
+        "sitelinks_defaults": None,
+        "autotargeting_defaults": None,
+        "campaign_name_suffix": None,
+        "budget_defaults": None,
+    }
+
+
+def build_default_draft_autotargeting_settings():
+    return {
+        "Categories": {
+            "Exact": "YES",
+            "Narrow": "YES",
+            "Alternative": "YES",
+            "Accessory": "YES",
+            "Broader": "YES",
+        },
+        "BrandOptions": {
+            "WithoutBrands": "YES",
+            "WithAdvertiserBrand": "YES",
+            "WithCompetitorsBrand": "NO",
+        },
+    }
+
+
+def normalize_sitelinks_defaults(value):
+    if not isinstance(value, list) or not value:
+        return None
+
+    normalized = []
+    for item in value:
+        if not isinstance(item, dict):
+            return None
+
+        title = item.get("title")
+        href = item.get("href")
+
+        if not isinstance(title, str) or not title.strip():
+            return None
+        if not isinstance(href, str) or not href.strip():
+            return None
+        if not href.strip().startswith("https://artfarfor.com"):
+            return None
+
+        normalized.append(
+            {
+                "title": title.strip(),
+                "href": href.strip(),
+            }
+        )
+
+    return normalized
+
+
+def normalize_budget_defaults(value):
+    if not isinstance(value, dict) or not value:
+        return None
+
+    allowed_keys = {"weekly_budget_rub", "target_cpa_rub"}
+    if any(key not in allowed_keys for key in value.keys()):
+        return None
+
+    normalized = {}
+
+    if "weekly_budget_rub" in value:
+        weekly_budget_rub = normalize_positive_number(value.get("weekly_budget_rub"))
+        if weekly_budget_rub is None:
+            return None
+        if weekly_budget_rub > 300000:
+            return None
+        normalized["weekly_budget_rub"] = format_rub_value(weekly_budget_rub)
+
+    if "target_cpa_rub" in value:
+        target_cpa_rub = normalize_positive_number(value.get("target_cpa_rub"))
+        if target_cpa_rub is None:
+            return None
+        if target_cpa_rub > 30000:
+            return None
+        normalized["target_cpa_rub"] = format_rub_value(target_cpa_rub)
+
+    if not normalized:
+        return None
+
+    if (
+        "weekly_budget_rub" in normalized
+        and "target_cpa_rub" in normalized
+        and normalized["weekly_budget_rub"] < normalized["target_cpa_rub"] * 20
+    ):
+        return None
+
+    return normalized
+
+
+def merge_autotargeting_settings(base_settings: dict, override_settings: dict) -> dict:
+    merged = deep_copy_json(base_settings)
+
+    if "Categories" in override_settings:
+        merged.setdefault("Categories", {})
+        merged["Categories"].update(override_settings["Categories"])
+
+    if "BrandOptions" in override_settings:
+        merged.setdefault("BrandOptions", {})
+        merged["BrandOptions"].update(override_settings["BrandOptions"])
+
+    return merged
+
+
+def build_ad_group_draft(name: str) -> dict:
+    group_name = name.strip()
+    return {
+        "group_name": group_name,
+        "negative_keywords": [],
+        "autotargeting_settings": build_default_draft_autotargeting_settings(),
+        "ads": [
+            {
+                "title": f"{group_name} | ArtFarfor",
+                "text": "Авторские фарфоровые статуэтки и подарки ручной работы",
+                "final_url": "https://artfarfor.com",
+            }
+        ],
+    }
+
+
+def build_draft_campaign_from_theme(theme: str) -> dict:
+    normalized_theme = theme.strip()
+    return {
+        "campaign_type": "UNIFIED_CAMPAIGN",
+        "campaign_name": f"{normalized_theme} | ArtFarfor",
+        "site_url": "https://artfarfor.com",
+        "region": "RU",
+        "language": "RU",
+        "placement_type": "both",
+        "goal_type": "leads",
+        "strategy_type": "pay_for_conversion",
+        "metrica_goal_id": DEFAULT_GOAL_ID,
+        "metrica_counter_id": DEFAULT_METRICA_COUNTER_ID,
+        "weekly_budget_rub": 10000,
+        "target_cpa_rub": 500,
+        "tracking_params": DEFAULT_DRAFT_TRACKING_PARAMS,
+        "utm_tracking": True,
+        "negative_keywords": ["бесплатно", "дешево"],
+        "sitelinks": [
+            {
+                "title": "Каталог",
+                "href": "https://artfarfor.com",
+            },
+            {
+                "title": "Коллекции",
+                "href": "https://artfarfor.com",
+            },
+        ],
+        "ad_groups": [
+            build_ad_group_draft(normalized_theme),
+        ],
+        "ads": [
+            {
+                "title": f"{normalized_theme} | ArtFarfor",
+                "text": "Подарочные фарфоровые статуэтки ручной работы",
+                "final_url": "https://artfarfor.com",
+            }
+        ],
+        "autotargeting_settings": build_default_draft_autotargeting_settings(),
+        "assumptions": [
+            "Assumption: used fixed site_url https://artfarfor.com per project restriction.",
+            "Assumption: region='RU' and goal_type='leads' are draft defaults for backend validate/create flow and require review.",
+            "Assumption: used RU, both placements, pay_for_conversion, metrica_goal_id 352606262 per confirmed project constraints.",
+            "Assumption: weekly_budget_rub=10000 and target_cpa_rub=500 are draft defaults and require review.",
+            "Assumption: sitelinks and negative keywords are prototype placeholders for review_draft.",
+        ],
+    }
+
+
+def apply_approved_patterns_to_draft(theme: str, draft_campaign: dict, approved_patterns: dict) -> dict:
+    draft = deep_copy_json(draft_campaign)
+    assumptions = draft.setdefault("assumptions", [])
+
+    if not isinstance(approved_patterns, dict):
+        return draft
+
+    campaign_name_suffix = approved_patterns.get("campaign_name_suffix")
+    if isinstance(campaign_name_suffix, str) and campaign_name_suffix:
+        draft["campaign_name"] = f"{theme.strip()}{campaign_name_suffix}"
+
+    negative_keywords_defaults = approved_patterns.get("negative_keywords_defaults")
+    if isinstance(negative_keywords_defaults, list) and negative_keywords_defaults:
+        draft["negative_keywords"] = deep_copy_json(negative_keywords_defaults)
+
+    sitelinks_defaults = approved_patterns.get("sitelinks_defaults")
+    if isinstance(sitelinks_defaults, list) and sitelinks_defaults:
+        allowed_sitelinks = []
+        skipped_sitelinks = False
+        for sitelink in sitelinks_defaults:
+            href = sitelink.get("href")
+            if isinstance(href, str) and href.startswith("https://artfarfor.com"):
+                allowed_sitelinks.append(deep_copy_json(sitelink))
+            else:
+                skipped_sitelinks = True
+
+        if allowed_sitelinks:
+            draft["sitelinks"] = allowed_sitelinks
+
+        if skipped_sitelinks:
+            assumptions.append("Assumption: skipped sitelinks_defaults entries outside https://artfarfor.com.")
+
+    autotargeting_defaults = approved_patterns.get("autotargeting_defaults")
+    if isinstance(autotargeting_defaults, dict) and autotargeting_defaults:
+        draft["autotargeting_settings"] = merge_autotargeting_settings(
+            draft.get("autotargeting_settings", build_default_draft_autotargeting_settings()),
+            autotargeting_defaults,
+        )
+        for ad_group in draft.get("ad_groups", []):
+            if isinstance(ad_group, dict):
+                ad_group["autotargeting_settings"] = merge_autotargeting_settings(
+                    ad_group.get("autotargeting_settings", build_default_draft_autotargeting_settings()),
+                    autotargeting_defaults,
+                )
+
+    budget_defaults = approved_patterns.get("budget_defaults")
+    if isinstance(budget_defaults, dict) and budget_defaults:
+        proposed_weekly_budget = budget_defaults.get("weekly_budget_rub", draft.get("weekly_budget_rub"))
+        proposed_target_cpa = budget_defaults.get("target_cpa_rub", draft.get("target_cpa_rub"))
+
+        if (
+            isinstance(proposed_weekly_budget, (int, float))
+            and isinstance(proposed_target_cpa, (int, float))
+            and proposed_weekly_budget >= proposed_target_cpa * 20
+        ):
+            if "weekly_budget_rub" in budget_defaults:
+                draft["weekly_budget_rub"] = budget_defaults["weekly_budget_rub"]
+            if "target_cpa_rub" in budget_defaults:
+                draft["target_cpa_rub"] = budget_defaults["target_cpa_rub"]
+        else:
+            assumptions.append("Assumption: skipped budget_defaults because it violates weekly_budget_rub >= target_cpa_rub * 20.")
+
+    return draft
+
+
+def build_default_runtime_state() -> dict:
+    return {
+        "session_mode": "draft_campaign",
+        "draft_campaign": None,
+        "campaign_payload": None,
+        "validation_result": None,
+        "created_campaign_id": None,
+        "last_plan": None,
+        "last_proposal": None,
+        "proposal_history": [],
+        "approved_patterns": build_default_approved_patterns(),
+        "draft_meta": {
+            "version": "v1",
+            "last_action": None,
+            "theme": None,
+            "revision_count": 0,
+            "supported_revision_rules": [
+                "измени название кампании на X",
+                "добавь группу X",
+                "добавь минус-слово X",
+            ],
+        },
+    }
+
+
+def render_state_markdown(state: dict) -> str:
+    rendered_state = json.dumps(state, ensure_ascii=False, indent=2)
+    return (
+        "# STATE.md - Campaign Draft State\n\n"
+        "## Session Modes\n\n"
+        "- draft_campaign\n"
+        "- review_draft\n"
+        "- analyze_campaign\n"
+        "- awaiting_confirm_create\n"
+        "- awaiting_confirm_update\n\n"
+        "## Current State\n\n"
+        "```json\n"
+        f"{rendered_state}\n"
+        "```\n"
+    )
+
+
+def load_runtime_state() -> dict:
+    if not os.path.exists(STATE_FILE_PATH):
+        return build_default_runtime_state()
+
+    try:
+        with open(STATE_FILE_PATH, "r", encoding="utf-8") as state_file:
+            raw_state = state_file.read()
+    except OSError:
+        return build_default_runtime_state()
+
+    marker = "```json"
+    start = raw_state.find(marker)
+    if start == -1:
+        return build_default_runtime_state()
+
+    start += len(marker)
+    end = raw_state.find("```", start)
+    if end == -1:
+        return build_default_runtime_state()
+
+    json_block = raw_state[start:end].strip()
+    if not json_block:
+        return build_default_runtime_state()
+
+    try:
+        parsed = json.loads(json_block)
+    except json.JSONDecodeError:
+        return build_default_runtime_state()
+
+    if not isinstance(parsed, dict):
+        return build_default_runtime_state()
+
+    state = build_default_runtime_state()
+    state.update(
+        {
+            key: parsed.get(key)
+            for key in (
+                "session_mode",
+                "draft_campaign",
+                "campaign_payload",
+                "validation_result",
+                "created_campaign_id",
+                "last_plan",
+                "last_proposal",
+                "proposal_history",
+                "approved_patterns",
+                "draft_meta",
+            )
+        }
+    )
+    if state.get("draft_meta") is None:
+        state["draft_meta"] = build_default_runtime_state()["draft_meta"]
+    if not isinstance(state.get("proposal_history"), list):
+        state["proposal_history"] = []
+    if not isinstance(state.get("approved_patterns"), dict):
+        state["approved_patterns"] = build_default_approved_patterns()
+    return state
+
+
+RUNTIME_STATE = load_runtime_state()
+
+
+def save_runtime_state(state: dict) -> None:
+    global RUNTIME_STATE
+    RUNTIME_STATE = deep_copy_json(state)
+    with open(STATE_FILE_PATH, "w", encoding="utf-8") as state_file:
+        state_file.write(render_state_markdown(RUNTIME_STATE))
+
+
+def build_campaign_payload_from_draft_state(draft_campaign: dict):
+    payload = {
+        "target": "production",
+        "campaign_name": draft_campaign.get("campaign_name"),
+        "site_url": draft_campaign.get("site_url"),
+        "region": draft_campaign.get("region"),
+        "language": draft_campaign.get("language"),
+        "placement_type": draft_campaign.get("placement_type"),
+        "goal_type": draft_campaign.get("goal_type"),
+        "strategy_type": draft_campaign.get("strategy_type"),
+        "metrica_goal_id": draft_campaign.get("metrica_goal_id"),
+        "weekly_budget_rub": draft_campaign.get("weekly_budget_rub"),
+        "target_cpa_rub": draft_campaign.get("target_cpa_rub"),
+        "utm_tracking": draft_campaign.get("utm_tracking"),
+        "ad_groups": draft_campaign.get("ad_groups", []),
+        "ads": draft_campaign.get("ads", []),
+        "tracking_params": draft_campaign.get("tracking_params"),
+        "negative_keywords": draft_campaign.get("negative_keywords", []),
+        "sitelinks": draft_campaign.get("sitelinks", []),
+        "autotargeting_settings": draft_campaign.get("autotargeting_settings"),
+        "campaign_type": draft_campaign.get("campaign_type"),
+        "metrica_counter_id": draft_campaign.get("metrica_counter_id"),
+        "assumptions": draft_campaign.get("assumptions", []),
+    }
+
+    missing_fields = []
+    for field_name in (
+        "campaign_name",
+        "site_url",
+        "region",
+        "language",
+        "placement_type",
+        "goal_type",
+        "strategy_type",
+        "metrica_goal_id",
+        "weekly_budget_rub",
+        "target_cpa_rub",
+    ):
+        if payload.get(field_name) in ("", None):
+            missing_fields.append(field_name)
+
+    return payload, missing_fields
+
+
 def resolve_offer_retargeting(payload: dict) -> str:
     raw = payload.get("offer_retargeting", "NO")
     if not isinstance(raw, str):
@@ -240,6 +721,56 @@ def parse_add_result(result: dict, entity_name: str) -> dict:
         "payload": {
             "status": "success",
             "id": str(first["Id"]),
+        },
+    }
+
+
+def parse_ad_image_add_result(result: dict) -> dict:
+    add_results = result.get("result", {}).get("AddResults", [])
+    if not add_results:
+        return {
+            "ok": False,
+            "status": 502,
+            "payload": {
+                "status": "error",
+                "message": "empty AddResults from Yandex Direct for ad_image",
+                "raw": result,
+            },
+        }
+
+    first = add_results[0]
+
+    if "Errors" in first:
+        return {
+            "ok": False,
+            "status": 400,
+            "payload": {
+                "status": "error",
+                "message": "Yandex Direct rejected ad_image create",
+                "errors": first["Errors"],
+                "raw": result,
+            },
+        }
+
+    ad_image_hash = first.get("AdImageHash")
+    if not isinstance(ad_image_hash, str) or not ad_image_hash.strip():
+        return {
+            "ok": False,
+            "status": 502,
+            "payload": {
+                "status": "error",
+                "message": "missing AdImageHash in Yandex Direct add response for ad_image",
+                "raw": result,
+            },
+        }
+
+    return {
+        "ok": True,
+        "status": 200,
+        "payload": {
+            "status": "success",
+            "ad_image_hash": ad_image_hash.strip(),
+            "warnings": first.get("Warnings", []),
         },
     }
 
@@ -352,6 +883,372 @@ def extract_current_upc_strategy(campaign: dict) -> dict:
         "cpa_micros": cpa_micros,
         "weekly_budget_micros": weekly_budget_micros,
     }
+
+
+def build_campaign_stats_response(campaign_id: int, raw_date_from=None, raw_date_to=None):
+    normalized_date_from = normalize_iso_date(raw_date_from) if raw_date_from is not None else None
+    normalized_date_to = normalize_iso_date(raw_date_to) if raw_date_to is not None else None
+
+    if raw_date_from is not None and normalized_date_from is None:
+        return {"status": "error", "message": "date_from must be in YYYY-MM-DD format"}, 400
+
+    if raw_date_to is not None and normalized_date_to is None:
+        return {"status": "error", "message": "date_to must be in YYYY-MM-DD format"}, 400
+
+    date_from = normalized_date_from or (date.today() - timedelta(days=7)).isoformat()
+    date_to = normalized_date_to or date.today().isoformat()
+
+    if date_from > date_to:
+        return {"status": "error", "message": "date_from must be <= date_to"}, 400
+
+    client = YandexDirectClient.for_target("production")
+
+    try:
+        report = client.get_campaign_stats_report(
+            campaign_id=campaign_id,
+            date_from=date_from,
+            date_to=date_to,
+        )
+    except YandexDirectClientError as e:
+        return (
+            {"status": "error", "message": str(e), "target": "production", "campaign_id": str(campaign_id)},
+            502,
+        )
+
+    try:
+        goal_report = client.get_campaign_goal_stats_report(
+            campaign_id=campaign_id,
+            date_from=date_from,
+            date_to=date_to,
+            goal_id=DEFAULT_GOAL_ID,
+        )
+    except YandexDirectClientError as e:
+        return (
+            {
+                "status": "error",
+                "message": str(e),
+                "target": "production",
+                "campaign_id": str(campaign_id),
+                "goal_id": str(DEFAULT_GOAL_ID),
+            },
+            502,
+        )
+
+    if report["report_status"] == "processing":
+        return (
+            {
+                "status": "processing",
+                "target": "production",
+                "campaign_id": str(campaign_id),
+                "date_from": date_from,
+                "date_to": date_to,
+                "request_id": report["request_id"],
+                "retry_in": report["retry_in"],
+                "rows": [],
+            },
+            report["status_code"],
+        )
+
+    rows = enrich_metrics(report["rows"])
+
+    goal_rows = []
+    goal_status = "unconfirmed"
+    if goal_report["report_status"] == "processing":
+        goal_status = "processing"
+    else:
+        goal_rows = goal_report.get("rows", [])
+        goal_status = "ready" if goal_rows else "unconfirmed"
+
+    return (
+        {
+            "status": "success",
+            "target": "production",
+            "campaign_id": str(campaign_id),
+            "date_from": date_from,
+            "date_to": date_to,
+            "fields": [
+                "Date",
+                "CampaignId",
+                "Clicks",
+                "Impressions",
+                "Cost",
+                "AllGoalsConversions",
+                "AllGoalsConversionRate",
+                "AllGoalsCostPerConversion",
+                "AvgCpc",
+                "CTR",
+                "CPC",
+                "GoalCPA",
+                "GoalConversionsConfirmed",
+                "AllGoalsConversionsNumeric",
+            ],
+            "rows": rows,
+            "all_goals_conversions_source": "aggregated_report_field",
+            "goal_id": str(DEFAULT_GOAL_ID),
+            "goal_attribution_model": "LC",
+            "goal_report_status": goal_status,
+            "goal_rows": goal_rows,
+            "request_id": report["request_id"],
+            "units": report["units"],
+        },
+        200,
+    )
+
+
+def build_campaign_analysis_response(stats_payload: dict, focus: Optional[str] = None) -> dict:
+    campaign_id = stats_payload.get("campaign_id")
+    date_from = stats_payload.get("date_from")
+    date_to = stats_payload.get("date_to")
+
+    if stats_payload.get("status") == "processing":
+        analysis = {
+            "status": "processing",
+            "campaign_id": campaign_id,
+            "date_from": date_from,
+            "date_to": date_to,
+            "analysis_mode": "report_processing",
+            "summary": {
+                "message": "Отчёт по кампании ещё формируется."
+            },
+            "traffic": {
+                "status": "processing"
+            },
+            "conversions": {
+                "goal_report_status": None,
+                "goal_conversions_confirmed": False,
+                "note": "Данные по кампании ещё недоступны."
+            },
+            "conclusion": [
+                "Отчёт по кампании ещё формируется."
+            ],
+            "recommendations": [
+                {
+                    "title": "Повторить анализ позже",
+                    "reason": "Основной отчёт кампании ещё формируется.",
+                    "kind": "confirmed",
+                }
+            ],
+        }
+        if focus == "low_conversion":
+            analysis["low_conversion_analysis"] = {
+                "confirmed_facts": [
+                    "Основной отчёт кампании ещё формируется."
+                ],
+                "possible_causes": [
+                    {
+                        "cause": "Причину низкой конверсии пока нельзя определить.",
+                        "confidence": "high",
+                        "basis": "Нет готового основного отчёта кампании.",
+                    }
+                ],
+                "next_checks": [
+                    "Повторить анализ после готовности основного отчёта кампании."
+                ],
+            }
+        return analysis
+
+    rows = stats_payload.get("rows", [])
+    goal_rows = stats_payload.get("goal_rows", [])
+    goal_report_status = stats_payload.get("goal_report_status")
+
+    impressions = sum(safe_float(row.get("Impressions")) for row in rows)
+    clicks = sum(safe_float(row.get("Clicks")) for row in rows)
+    cost = sum(safe_float(row.get("Cost")) for row in rows)
+    all_goals_conversions = sum(safe_float(row.get("AllGoalsConversionsNumeric")) for row in rows)
+
+    ctr = (clicks / impressions * 100) if impressions > 0 else 0.0
+    cpc = (cost / clicks) if clicks > 0 else 0.0
+
+    goal_conversions_confirmed = any(bool(row.get("GoalConversionsConfirmed")) for row in rows)
+    goal_conversions = sum(safe_float(row.get("Conversions")) for row in goal_rows)
+
+    analysis_mode = "goal_efficiency" if goal_report_status == "ready" and goal_conversions_confirmed else "traffic_only"
+
+    goal_cpa = None
+    if analysis_mode == "goal_efficiency" and goal_conversions > 0:
+        goal_cpa = round(cost / goal_conversions, 4)
+
+    conversions_note = None
+    if goal_report_status == "processing":
+        conversions_note = "Отчёт по целевой цели ещё формируется."
+    elif goal_report_status != "ready":
+        conversions_note = "По целевой цели стратегии данные отсутствуют; анализ целевой эффективности недоступен."
+    elif not goal_conversions_confirmed:
+        conversions_note = "GoalConversionsConfirmed != true; анализ GoalCPA не выполняется."
+    elif goal_conversions <= 0:
+        conversions_note = "Подтверждённые конверсии по целевой цели не зафиксированы."
+    else:
+        conversions_note = "Подтверждённые данные по целевой цели доступны."
+
+    conclusion = [
+        f"За период получено {format_rub_value(impressions)} показов, {format_rub_value(clicks)} кликов и расход {round(cost, 4)}."
+    ]
+    if goal_report_status == "processing":
+        conclusion.append("Отчёт по целевой цели ещё формируется.")
+    elif goal_report_status != "ready":
+        conclusion.append("По целевой цели стратегии данные отсутствуют; анализ целевой эффективности недоступен.")
+    elif not goal_conversions_confirmed:
+        conclusion.append("Текущий stats flow не подтверждает GoalConversionsConfirmed=true; анализ GoalCPA не выполняется.")
+    elif goal_cpa is not None:
+        conclusion.append(f"Подтверждённый GoalCPA за период: {goal_cpa}.")
+
+    recommendations = []
+    if goal_report_status == "processing":
+        recommendations.append(
+            {
+                "title": "Дождаться отчёта по цели",
+                "reason": "Отчёт по целевой цели ещё формируется.",
+                "kind": "confirmed",
+            }
+        )
+    elif goal_report_status != "ready":
+        recommendations.append(
+            {
+                "title": "Проверить данные по целевой цели",
+                "reason": "По целевой цели стратегии данные отсутствуют; анализ целевой эффективности недоступен.",
+                "kind": "confirmed",
+            }
+        )
+        recommendations.append(
+            {
+                "title": "Проверить связку Метрики и цели",
+                "reason": f"Нужно проверить, поступают ли данные по цели {DEFAULT_GOAL_ID} и корректно ли она используется стратегией.",
+                "kind": "hypothesis",
+            }
+        )
+    elif not goal_conversions_confirmed:
+        recommendations.append(
+            {
+                "title": "Подтвердить конверсии по цели",
+                "reason": "Текущий stats flow не подтверждает GoalConversionsConfirmed=true; менять target CPA по этим данным нельзя.",
+                "kind": "confirmed",
+            }
+        )
+
+    if clicks == 0 and impressions > 0:
+        recommendations.append(
+            {
+                "title": "Проверить кликабельность",
+                "reason": "Есть показы без кликов; конверсионное качество трафика пока нельзя оценить.",
+                "kind": "hypothesis",
+            }
+        )
+    elif clicks > 0 and all_goals_conversions == 0:
+        recommendations.append(
+            {
+                "title": "Проверить посадочную страницу и релевантность трафика",
+                "reason": "Есть трафик и расход, но агрегированные all-goals conversions не зафиксированы даже как справочная метрика.",
+                "kind": "hypothesis",
+            }
+        )
+
+    analysis = {
+        "status": "success",
+        "campaign_id": campaign_id,
+        "date_from": date_from,
+        "date_to": date_to,
+        "analysis_mode": analysis_mode,
+        "summary": {
+            "goal_report_status": goal_report_status,
+            "goal_conversions_confirmed": goal_conversions_confirmed,
+            "all_goals_conversions_reference": format_rub_value(all_goals_conversions),
+        },
+        "traffic": {
+            "impressions": format_rub_value(impressions),
+            "clicks": format_rub_value(clicks),
+            "cost": round(cost, 4),
+            "ctr": round(ctr, 4),
+            "cpc": round(cpc, 4),
+        },
+        "conversions": {
+            "goal_report_status": goal_report_status,
+            "goal_conversions_confirmed": goal_conversions_confirmed,
+            "goal_conversions": format_rub_value(goal_conversions) if goal_rows else None,
+            "goal_cpa": goal_cpa,
+            "all_goals_conversions_reference": format_rub_value(all_goals_conversions),
+            "note": conversions_note,
+        },
+        "conclusion": conclusion,
+        "recommendations": recommendations,
+    }
+
+    if focus == "low_conversion":
+        confirmed_facts = [
+            f"Показы: {format_rub_value(impressions)}.",
+            f"Клики: {format_rub_value(clicks)}.",
+            f"Расход: {round(cost, 4)}.",
+            f"Справочная all-goals conversions: {format_rub_value(all_goals_conversions)}.",
+        ]
+
+        if goal_report_status == "processing":
+            confirmed_facts.append("Отчёт по целевой цели ещё формируется.")
+        elif goal_report_status != "ready":
+            confirmed_facts.append("По целевой цели стратегии данные отсутствуют; анализ целевой эффективности недоступен.")
+        elif not goal_conversions_confirmed:
+            confirmed_facts.append("GoalConversionsConfirmed != true; анализ GoalCPA не выполняется.")
+        else:
+            confirmed_facts.append(f"Подтверждённые конверсии по цели: {format_rub_value(goal_conversions)}.")
+
+        possible_causes = []
+        if goal_report_status == "processing":
+            possible_causes.append(
+                {
+                    "cause": "Причину низкой конверсии по целевой цели пока нельзя подтвердить.",
+                    "confidence": "high",
+                    "basis": "Отчёт по целевой цели ещё формируется.",
+                }
+            )
+        elif goal_report_status != "ready":
+            possible_causes.append(
+                {
+                    "cause": "Причину низкой конверсии по целевой цели нельзя подтвердить из-за отсутствия данных по цели.",
+                    "confidence": "high",
+                    "basis": "Goal report не готов к анализу целевой эффективности.",
+                }
+            )
+        elif not goal_conversions_confirmed:
+            possible_causes.append(
+                {
+                    "cause": "Причину низкой конверсии по целевой цели нельзя подтвердить, потому что GoalConversionsConfirmed != true.",
+                    "confidence": "high",
+                    "basis": "Текущий stats flow не подтверждает целевые конверсии для расчёта GoalCPA.",
+                }
+            )
+
+        if clicks == 0 and impressions > 0:
+            possible_causes.append(
+                {
+                    "cause": "Недостаточно кликов для оценки конверсии.",
+                    "confidence": "high",
+                    "basis": "Есть показы, но кликов нет.",
+                }
+            )
+        elif clicks > 0 and all_goals_conversions == 0:
+            possible_causes.append(
+                {
+                    "cause": "Трафик может быть нерелевантным или посадочная страница не доводит пользователя до действий.",
+                    "confidence": "medium",
+                    "basis": "Есть клики и расход, но даже агрегированные all-goals conversions равны 0.",
+                }
+            )
+
+        next_checks = []
+        if goal_report_status == "processing":
+            next_checks.append("Повторить анализ после готовности отчёта по целевой цели.")
+        else:
+            next_checks.append(f"Проверить, поступают ли данные по цели {DEFAULT_GOAL_ID} в Метрику.")
+        if clicks == 0 and impressions > 0:
+            next_checks.append("Проверить объявления, поисковые запросы и кликабельность.")
+        else:
+            next_checks.append("Проверить посадочную страницу, поисковые запросы и соответствие оффера трафику.")
+
+        analysis["low_conversion_analysis"] = {
+            "confirmed_facts": confirmed_facts,
+            "possible_causes": possible_causes,
+            "next_checks": next_checks,
+        }
+
+    return analysis
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -605,6 +1502,410 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(response_payload, 200)
             return
 
+        if self.path == "/propose_campaign_update":
+            campaign_id = normalize_campaign_id(data.get("campaign_id"))
+            if campaign_id is None:
+                self._send_json({"status": "error", "message": "campaign_id must be a positive integer or numeric string"}, 400)
+                return
+
+            change_request = data.get("change_request")
+            if not isinstance(change_request, dict):
+                self._send_json({"status": "error", "message": "change_request must be an object"}, 400)
+                return
+
+            change_type = change_request.get("type")
+            if change_type not in {"update_cpa", "update_weekly_budget"}:
+                self._send_json({"status": "error", "message": "supported change_request.type values are update_cpa and update_weekly_budget"}, 400)
+                return
+
+            change_value = normalize_positive_number(change_request.get("value"))
+            if change_value is None:
+                self._send_json({"status": "error", "message": "change_request.value must be a positive number"}, 400)
+                return
+
+            client = YandexDirectClient.for_target("production")
+
+            try:
+                current_result = client.get_campaign_details(campaign_id)
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": "production", "campaign_id": str(campaign_id)},
+                    502,
+                )
+                return
+
+            campaigns = current_result.get("result", {}).get("Campaigns", [])
+            if not campaigns:
+                self._send_json(
+                    {"status": "error", "message": "campaign not found", "target": "production", "campaign_id": str(campaign_id), "raw": current_result},
+                    404,
+                )
+                return
+
+            current_strategy = extract_current_upc_strategy(campaigns[0])
+            current_cpa_rub = micros_to_rub(current_strategy["cpa_micros"])
+            current_weekly_budget_rub = micros_to_rub(current_strategy["weekly_budget_micros"])
+
+            if change_type == "update_cpa":
+                if float(change_value) == float(current_cpa_rub):
+                    self._send_json({"status": "error", "message": "proposal does not change campaign cpa"}, 400)
+                    return
+
+                if current_weekly_budget_rub < change_value * 20:
+                    self._send_json(
+                        {"status": "error", "message": f"weekly_budget_rub must be >= target_cpa_rub * 20 ({change_value * 20})"},
+                        400,
+                    )
+                    return
+
+                proposal_changes = [
+                    {
+                        "field": "Cpa",
+                        "old_value": format_rub_value(current_cpa_rub),
+                        "new_value": format_rub_value(change_value),
+                    }
+                ]
+                summary = (
+                    f"Снижение CPA с {format_rub_value(current_cpa_rub)} до {format_rub_value(change_value)}"
+                    if change_value < current_cpa_rub
+                    else f"Повышение CPA с {format_rub_value(current_cpa_rub)} до {format_rub_value(change_value)}"
+                )
+                update_payload = {
+                    "campaign_id": str(campaign_id),
+                    "target_cpa_rub": format_rub_value(change_value),
+                }
+            else:
+                if float(change_value) == float(current_weekly_budget_rub):
+                    self._send_json({"status": "error", "message": "proposal does not change campaign weekly budget"}, 400)
+                    return
+
+                if change_value < current_cpa_rub * 20:
+                    self._send_json(
+                        {"status": "error", "message": f"weekly_budget_rub must be >= target_cpa_rub * 20 ({current_cpa_rub * 20})"},
+                        400,
+                    )
+                    return
+
+                proposal_changes = [
+                    {
+                        "field": "WeeklySpendLimit",
+                        "old_value": format_rub_value(current_weekly_budget_rub),
+                        "new_value": format_rub_value(change_value),
+                    }
+                ]
+                summary = (
+                    f"Снижение недельного бюджета с {format_rub_value(current_weekly_budget_rub)} до {format_rub_value(change_value)}"
+                    if change_value < current_weekly_budget_rub
+                    else f"Увеличение недельного бюджета с {format_rub_value(current_weekly_budget_rub)} до {format_rub_value(change_value)}"
+                )
+                update_payload = {
+                    "campaign_id": str(campaign_id),
+                    "weekly_budget_rub": format_rub_value(change_value),
+                }
+
+            proposal = {
+                "campaign_id": str(campaign_id),
+                "target": "production",
+                "change_request": {
+                    "type": change_type,
+                    "value": format_rub_value(change_value),
+                },
+                "changes": proposal_changes,
+                "summary": summary,
+                "update_payload": update_payload,
+            }
+
+            state = deep_copy_json(RUNTIME_STATE)
+            state["session_mode"] = "awaiting_confirm_update"
+            state["last_plan"] = None
+            state["last_proposal"] = proposal
+            proposal_history = state.get("proposal_history", [])
+            if not isinstance(proposal_history, list):
+                proposal_history = []
+            proposal_history.append(proposal)
+            state["proposal_history"] = proposal_history
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "proposal": {
+                        "campaign_id": proposal["campaign_id"],
+                        "changes": proposal["changes"],
+                        "summary": proposal["summary"],
+                    },
+                    "session_mode": state["session_mode"],
+                },
+                200,
+            )
+            return
+
+        if self.path == "/plan_campaign_update":
+            campaign_id = normalize_campaign_id(data.get("campaign_id"))
+            if campaign_id is None:
+                self._send_json({"status": "error", "message": "campaign_id must be a positive integer or numeric string"}, 400)
+                return
+
+            raw_changes = data.get("changes")
+            if not isinstance(raw_changes, list) or not raw_changes:
+                self._send_json({"status": "error", "message": "changes must be a non-empty array"}, 400)
+                return
+
+            client = YandexDirectClient.for_target("production")
+
+            try:
+                current_result = client.get_campaign_details(campaign_id)
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": "production", "campaign_id": str(campaign_id)},
+                    502,
+                )
+                return
+
+            campaigns = current_result.get("result", {}).get("Campaigns", [])
+            if not campaigns:
+                self._send_json(
+                    {"status": "error", "message": "campaign not found", "target": "production", "campaign_id": str(campaign_id), "raw": current_result},
+                    404,
+                )
+                return
+
+            current_strategy = extract_current_upc_strategy(campaigns[0])
+            planned_cpa_rub = micros_to_rub(current_strategy["cpa_micros"])
+            planned_weekly_budget_rub = micros_to_rub(current_strategy["weekly_budget_micros"])
+
+            plan_changes = []
+            summary_parts = []
+            update_payload = {
+                "campaign_id": str(campaign_id),
+            }
+
+            for raw_change in raw_changes:
+                if not isinstance(raw_change, dict):
+                    self._send_json({"status": "error", "message": "each changes item must be an object"}, 400)
+                    return
+
+                change_type = raw_change.get("type")
+                if change_type not in {"update_cpa", "update_weekly_budget"}:
+                    self._send_json({"status": "error", "message": "supported changes types are update_cpa and update_weekly_budget"}, 400)
+                    return
+
+                change_value = normalize_positive_number(raw_change.get("value"))
+                if change_value is None:
+                    self._send_json({"status": "error", "message": "each changes value must be a positive number"}, 400)
+                    return
+
+                if change_type == "update_cpa":
+                    old_value = planned_cpa_rub
+                    if float(change_value) == float(old_value):
+                        self._send_json({"status": "error", "message": "plan does not change campaign cpa"}, 400)
+                        return
+
+                    if planned_weekly_budget_rub < change_value * 20:
+                        self._send_json(
+                            {"status": "error", "message": f"weekly_budget_rub must be >= target_cpa_rub * 20 ({change_value * 20})"},
+                            400,
+                        )
+                        return
+
+                    plan_changes.append(
+                        {
+                            "type": "update_cpa",
+                            "field": "Cpa",
+                            "old_value": format_rub_value(old_value),
+                            "new_value": format_rub_value(change_value),
+                        }
+                    )
+                    summary_parts.append(f"CPA {format_rub_value(old_value)} -> {format_rub_value(change_value)}")
+                    planned_cpa_rub = change_value
+                    update_payload["target_cpa_rub"] = format_rub_value(change_value)
+                else:
+                    old_value = planned_weekly_budget_rub
+                    if float(change_value) == float(old_value):
+                        self._send_json({"status": "error", "message": "plan does not change campaign weekly budget"}, 400)
+                        return
+
+                    if change_value < planned_cpa_rub * 20:
+                        self._send_json(
+                            {"status": "error", "message": f"weekly_budget_rub must be >= target_cpa_rub * 20 ({planned_cpa_rub * 20})"},
+                            400,
+                        )
+                        return
+
+                    plan_changes.append(
+                        {
+                            "type": "update_weekly_budget",
+                            "field": "WeeklySpendLimit",
+                            "old_value": format_rub_value(old_value),
+                            "new_value": format_rub_value(change_value),
+                        }
+                    )
+                    summary_parts.append(
+                        f"WeeklySpendLimit {format_rub_value(old_value)} -> {format_rub_value(change_value)}"
+                    )
+                    planned_weekly_budget_rub = change_value
+                    update_payload["weekly_budget_rub"] = format_rub_value(change_value)
+
+            plan = {
+                "campaign_id": str(campaign_id),
+                "target": "production",
+                "changes": plan_changes,
+                "summary": "; ".join(summary_parts),
+                "apply_ready": True,
+                "update_payload": update_payload,
+            }
+
+            state = deep_copy_json(RUNTIME_STATE)
+            state["session_mode"] = "awaiting_confirm_update"
+            state["last_plan"] = plan
+            state["last_proposal"] = None
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "plan": {
+                        "campaign_id": plan["campaign_id"],
+                        "changes": plan["changes"],
+                        "summary": plan["summary"],
+                        "apply_ready": plan["apply_ready"],
+                    },
+                    "session_mode": state["session_mode"],
+                },
+                200,
+            )
+            return
+
+        if self.path == "/apply_campaign_update":
+            confirm = resolve_confirm(data)
+            if not confirm:
+                self._send_json({"status": "error", "message": "apply_campaign_update requires explicit confirm=true"}, 400)
+                return
+
+            state = deep_copy_json(RUNTIME_STATE)
+            if state.get("session_mode") != "awaiting_confirm_update":
+                self._send_json({"status": "error", "message": "session_mode must be awaiting_confirm_update"}, 409)
+                return
+
+            pending_plan = state.get("last_plan")
+            pending_proposal = state.get("last_proposal")
+
+            pending_update = pending_plan if isinstance(pending_plan, dict) else pending_proposal
+            pending_key = "last_plan" if isinstance(pending_plan, dict) else "last_proposal"
+
+            if not isinstance(pending_update, dict):
+                self._send_json({"status": "error", "message": "last_plan or last_proposal is not initialized"}, 409)
+                return
+
+            campaign_id = normalize_campaign_id(pending_update.get("campaign_id"))
+            if campaign_id is None:
+                self._send_json({"status": "error", "message": f"{pending_key} campaign_id is invalid"}, 409)
+                return
+
+            update_payload = pending_update.get("update_payload")
+            if not isinstance(update_payload, dict):
+                self._send_json({"status": "error", "message": f"{pending_key} update_payload is invalid"}, 409)
+                return
+
+            target_cpa_rub = normalize_positive_number(update_payload.get("target_cpa_rub"))
+            weekly_budget_rub = normalize_positive_number(update_payload.get("weekly_budget_rub"))
+
+            if target_cpa_rub is None and weekly_budget_rub is None:
+                self._send_json({"status": "error", "message": f"{pending_key} has no supported update fields"}, 409)
+                return
+
+            client = YandexDirectClient.for_target("production")
+
+            try:
+                current_result = client.get_campaign_details(campaign_id)
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": "production", "campaign_id": str(campaign_id)},
+                    502,
+                )
+                return
+
+            campaigns = current_result.get("result", {}).get("Campaigns", [])
+            if not campaigns:
+                self._send_json(
+                    {"status": "error", "message": "campaign not found", "target": "production", "campaign_id": str(campaign_id), "raw": current_result},
+                    404,
+                )
+                return
+
+            current_strategy = extract_current_upc_strategy(campaigns[0])
+            current_goal_id = current_strategy["goal_id"]
+            current_cpa_rub = micros_to_rub(current_strategy["cpa_micros"])
+            current_weekly_budget_rub = micros_to_rub(current_strategy["weekly_budget_micros"])
+
+            final_cpa_rub = target_cpa_rub if target_cpa_rub is not None else current_cpa_rub
+            final_weekly_budget_rub = weekly_budget_rub if weekly_budget_rub is not None else current_weekly_budget_rub
+
+            if final_weekly_budget_rub < final_cpa_rub * 20:
+                self._send_json(
+                    {"status": "error", "message": f"weekly_budget_rub must be >= target_cpa_rub * 20 ({final_cpa_rub * 20})"},
+                    400,
+                )
+                return
+
+            try:
+                result = client.update_campaign_production(
+                    campaign_id=campaign_id,
+                    name=None,
+                    goal_id=current_goal_id,
+                    cpa_micros=rub_to_micros(final_cpa_rub),
+                    weekly_budget_micros=rub_to_micros(final_weekly_budget_rub),
+                )
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": "production", "campaign_id": str(campaign_id)},
+                    502,
+                )
+                return
+
+            parsed = parse_update_result(result, "campaign")
+            if not parsed["ok"]:
+                payload = parsed["payload"]
+                payload["target"] = "production"
+                payload["campaign_id"] = str(campaign_id)
+                self._send_json(payload, parsed["status"])
+                return
+
+            state["session_mode"] = "analyze_campaign"
+            state["last_plan"] = None
+            state["last_proposal"] = None
+            save_runtime_state(state)
+
+            response_payload = {
+                "status": "success",
+                "campaign_id": parsed["payload"]["id"],
+                "target": "production",
+                "warnings": parsed["payload"]["warnings"],
+                "updated_strategy": {
+                    "target_cpa_rub": format_rub_value(final_cpa_rub),
+                    "weekly_budget_rub": format_rub_value(final_weekly_budget_rub),
+                    "metrica_goal_id": str(current_goal_id),
+                },
+                "result": result,
+            }
+
+            if pending_key == "last_plan":
+                response_payload["applied_plan"] = {
+                    "campaign_id": pending_update["campaign_id"],
+                    "changes": pending_update.get("changes", []),
+                    "summary": pending_update.get("summary"),
+                    "apply_ready": pending_update.get("apply_ready", True),
+                }
+            else:
+                response_payload["applied_proposal"] = {
+                    "campaign_id": pending_update["campaign_id"],
+                    "changes": pending_update.get("changes", []),
+                    "summary": pending_update.get("summary"),
+                }
+
+            self._send_json(response_payload, 200)
+            return
+
         if self.path == "/get_campaign_stats":
             raw_target = data.get("target", "production")
             target = raw_target.strip().lower() if isinstance(raw_target, str) else ""
@@ -624,107 +1925,39 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"status": "error", "message": "campaign_id must be a positive integer or numeric string"}, 400)
                 return
 
-            raw_date_from = data.get("date_from")
-            raw_date_to = data.get("date_to")
-
-            normalized_date_from = normalize_iso_date(raw_date_from) if raw_date_from is not None else None
-            normalized_date_to = normalize_iso_date(raw_date_to) if raw_date_to is not None else None
-
-            if raw_date_from is not None and normalized_date_from is None:
-                self._send_json({"status": "error", "message": "date_from must be in YYYY-MM-DD format"}, 400)
-                return
-
-            if raw_date_to is not None and normalized_date_to is None:
-                self._send_json({"status": "error", "message": "date_to must be in YYYY-MM-DD format"}, 400)
-                return
-
-            date_from = normalized_date_from or (date.today() - timedelta(days=7)).isoformat()
-            date_to = normalized_date_to or date.today().isoformat()
-
-            if date_from > date_to:
-                self._send_json({"status": "error", "message": "date_from must be <= date_to"}, 400)
-                return
-
-            client = YandexDirectClient.for_target("production")
-
-            try:
-                report = client.get_campaign_stats_report(
-                    campaign_id=campaign_id,
-                    date_from=date_from,
-                    date_to=date_to,
-                )
-            except YandexDirectClientError as e:
-                self._send_json(
-                    {"status": "error", "message": str(e), "target": "production", "campaign_id": str(campaign_id)},
-                    502,
-                )
-                return
-
-            try:
-                goal_report = client.get_campaign_goal_stats_report(
-                    campaign_id=campaign_id,
-                    date_from=date_from,
-                    date_to=date_to,
-                    goal_id=DEFAULT_GOAL_ID,
-                )
-            except YandexDirectClientError as e:
-                self._send_json(
-                    {
-                        "status": "error",
-                        "message": str(e),
-                        "target": "production",
-                        "campaign_id": str(campaign_id),
-                        "goal_id": str(DEFAULT_GOAL_ID),
-                    },
-                    502,
-                )
-                return
-
-            if report["report_status"] == "processing":
-                self._send_json(
-                    {
-                        "status": "processing",
-                        "target": "production",
-                        "campaign_id": str(campaign_id),
-                        "date_from": date_from,
-                        "date_to": date_to,
-                        "request_id": report["request_id"],
-                        "retry_in": report["retry_in"],
-                        "rows": [],
-                    },
-                    report["status_code"],
-                )
-                return
-
-            rows = enrich_metrics(report["rows"])
-
-            goal_rows = []
-            goal_status = "unconfirmed"
-            if goal_report["report_status"] == "processing":
-                goal_status = "processing"
-            else:
-                goal_rows = goal_report.get("rows", [])
-                goal_status = "ready" if goal_rows else "unconfirmed"
-
-            self._send_json(
-                {
-                    "status": "success",
-                    "target": "production",
-                    "campaign_id": str(campaign_id),
-                    "date_from": date_from,
-                    "date_to": date_to,
-                    "fields": ["Date", "CampaignId", "Clicks", "Impressions", "Cost", "AllGoalsConversions", "AllGoalsConversionRate", "AllGoalsCostPerConversion", "AvgCpc", "CTR", "CPC", "GoalCPA", "GoalConversionsConfirmed", "AllGoalsConversionsNumeric"],
-                    "rows": rows,
-                    "all_goals_conversions_source": "aggregated_report_field",
-                    "goal_id": str(DEFAULT_GOAL_ID),
-                    "goal_attribution_model": "LC",
-                    "goal_report_status": goal_status,
-                    "goal_rows": goal_rows,
-                    "request_id": report["request_id"],
-                    "units": report["units"],
-                },
-                200,
+            payload, status_code = build_campaign_stats_response(
+                campaign_id=campaign_id,
+                raw_date_from=data.get("date_from"),
+                raw_date_to=data.get("date_to"),
             )
+            self._send_json(payload, status_code)
+            return
+
+        if self.path == "/analyze_campaign":
+            campaign_id = normalize_campaign_id(data.get("campaign_id"))
+            if campaign_id is None:
+                self._send_json({"status": "error", "message": "campaign_id must be a positive integer or numeric string"}, 400)
+                return
+
+            focus = data.get("focus")
+            if focus is not None:
+                if not isinstance(focus, str) or not focus.strip():
+                    self._send_json({"status": "error", "message": "focus must be a non-empty string when provided"}, 400)
+                    return
+                focus = focus.strip().lower()
+
+            stats_payload, stats_status_code = build_campaign_stats_response(
+                campaign_id=campaign_id,
+                raw_date_from=data.get("date_from"),
+                raw_date_to=data.get("date_to"),
+            )
+
+            if stats_payload.get("status") == "error":
+                self._send_json(stats_payload, stats_status_code)
+                return
+
+            analysis_payload = build_campaign_analysis_response(stats_payload, focus=focus)
+            self._send_json(analysis_payload, stats_status_code)
             return
 
         if self.path == "/get_campaign_status":
@@ -963,6 +2196,912 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if self.path == "/save_approved_pattern":
+            pattern_type = data.get("pattern_type")
+            if pattern_type not in {
+                "negative_keywords_defaults",
+                "sitelinks_defaults",
+                "autotargeting_defaults",
+                "campaign_name_suffix",
+                "budget_defaults",
+            }:
+                self._send_json({"status": "error", "message": "unsupported pattern_type"}, 400)
+                return
+
+            value = data.get("value")
+            normalized_value = None
+
+            if pattern_type == "negative_keywords_defaults":
+                normalized_value = normalize_negative_keywords(value)
+                if normalized_value is None or not normalized_value:
+                    self._send_json({"status": "error", "message": "value must be a non-empty array of strings"}, 400)
+                    return
+            elif pattern_type == "sitelinks_defaults":
+                normalized_value = normalize_sitelinks_defaults(value)
+                if normalized_value is None:
+                    self._send_json(
+                        {"status": "error", "message": "value must be a non-empty sitelinks array under https://artfarfor.com"},
+                        400,
+                    )
+                    return
+            elif pattern_type == "autotargeting_defaults":
+                normalized_value = normalize_autotargeting_settings(value)
+                if normalized_value is None:
+                    self._send_json(
+                        {"status": "error", "message": "value must be a confirmed autotargeting settings object"},
+                        400,
+                    )
+                    return
+            elif pattern_type == "campaign_name_suffix":
+                if not isinstance(value, str) or not value.strip():
+                    self._send_json({"status": "error", "message": "value must be a non-empty string"}, 400)
+                    return
+                normalized_value = value
+            elif pattern_type == "budget_defaults":
+                normalized_value = normalize_budget_defaults(value)
+                if normalized_value is None:
+                    self._send_json(
+                        {
+                            "status": "error",
+                            "message": "value must be a budget_defaults object compatible with current validate rules",
+                        },
+                        400,
+                    )
+                    return
+
+            state = deep_copy_json(RUNTIME_STATE)
+            approved_patterns = state.get("approved_patterns")
+            if not isinstance(approved_patterns, dict):
+                approved_patterns = build_default_approved_patterns()
+
+            approved_patterns[pattern_type] = deep_copy_json(normalized_value)
+            state["approved_patterns"] = approved_patterns
+            state["draft_meta"]["last_action"] = "save_approved_pattern"
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "approved_patterns": state["approved_patterns"],
+                },
+                200,
+            )
+            return
+
+        if self.path == "/get_approved_patterns":
+            state = deep_copy_json(RUNTIME_STATE)
+            approved_patterns = state.get("approved_patterns")
+            if not isinstance(approved_patterns, dict):
+                approved_patterns = build_default_approved_patterns()
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "approved_patterns": approved_patterns,
+                },
+                200,
+            )
+            return
+
+        if self.path == "/draft_campaign_from_theme":
+            theme = data.get("theme")
+            if not isinstance(theme, str) or not theme.strip():
+                self._send_json({"status": "error", "message": "theme must be a non-empty string"}, 400)
+                return
+
+            state = build_default_runtime_state()
+            current_state = deep_copy_json(RUNTIME_STATE)
+            approved_patterns = current_state.get("approved_patterns")
+            if not isinstance(approved_patterns, dict):
+                approved_patterns = build_default_approved_patterns()
+            state["session_mode"] = "review_draft"
+            state["approved_patterns"] = deep_copy_json(approved_patterns)
+            state["draft_campaign"] = apply_approved_patterns_to_draft(
+                theme.strip(),
+                build_draft_campaign_from_theme(theme.strip()),
+                state["approved_patterns"],
+            )
+            state["campaign_payload"] = None
+            state["validation_result"] = None
+            state["created_campaign_id"] = None
+            state["draft_meta"]["theme"] = theme.strip()
+            state["draft_meta"]["last_action"] = "draft_campaign_from_theme"
+            state["draft_meta"]["revision_count"] = 0
+
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "session_mode": state["session_mode"],
+                    "draft_campaign": state["draft_campaign"],
+                },
+                200,
+            )
+            return
+
+        if self.path == "/revise_campaign_draft":
+            instruction = data.get("instruction")
+            if not isinstance(instruction, str) or not instruction.strip():
+                self._send_json({"status": "error", "message": "instruction must be a non-empty string"}, 400)
+                return
+
+            state = deep_copy_json(RUNTIME_STATE)
+            draft_campaign = state.get("draft_campaign")
+            if not isinstance(draft_campaign, dict):
+                self._send_json({"status": "error", "message": "draft_campaign is not initialized"}, 409)
+                return
+
+            raw_instruction = instruction.strip()
+            lowered_instruction = raw_instruction.lower()
+            supported = True
+
+            if lowered_instruction.startswith("измени название кампании на "):
+                new_name = raw_instruction[len("измени название кампании на "):].strip()
+                if not new_name:
+                    self._send_json({"status": "error", "message": "campaign name must be a non-empty string"}, 400)
+                    return
+                draft_campaign["campaign_name"] = new_name
+            elif lowered_instruction.startswith("добавь группу "):
+                group_name = raw_instruction[len("добавь группу "):].strip()
+                if not group_name:
+                    self._send_json({"status": "error", "message": "group name must be a non-empty string"}, 400)
+                    return
+                draft_campaign.setdefault("ad_groups", []).append(build_ad_group_draft(group_name))
+            elif lowered_instruction.startswith("добавь минус-слово "):
+                negative_keyword = raw_instruction[len("добавь минус-слово "):].strip()
+                if not negative_keyword:
+                    self._send_json({"status": "error", "message": "negative keyword must be a non-empty string"}, 400)
+                    return
+                draft_campaign.setdefault("negative_keywords", [])
+                if negative_keyword not in draft_campaign["negative_keywords"]:
+                    draft_campaign["negative_keywords"].append(negative_keyword)
+            else:
+                supported = False
+
+            if not supported:
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": "instruction is not supported in v1 draft revision",
+                    },
+                    400,
+                )
+                return
+
+            state["session_mode"] = "review_draft"
+            state["draft_campaign"] = draft_campaign
+            state["campaign_payload"] = None
+            state["validation_result"] = None
+            state["created_campaign_id"] = None
+            state["draft_meta"]["last_action"] = "revise_campaign_draft"
+            state["draft_meta"]["revision_count"] = int(state["draft_meta"].get("revision_count", 0)) + 1
+
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "session_mode": state["session_mode"],
+                    "draft_campaign": state["draft_campaign"],
+                },
+                200,
+            )
+            return
+
+        if self.path == "/build_campaign_payload_from_draft":
+            state = deep_copy_json(RUNTIME_STATE)
+            draft_campaign = state.get("draft_campaign")
+            if not isinstance(draft_campaign, dict):
+                self._send_json({"status": "error", "message": "draft_campaign is not initialized"}, 409)
+                return
+
+            campaign_payload, missing_fields = build_campaign_payload_from_draft_state(draft_campaign)
+            if missing_fields:
+                self._send_json({"status": "error", "missing_fields": missing_fields}, 400)
+                return
+
+            state["session_mode"] = "awaiting_confirm_create"
+            state["campaign_payload"] = campaign_payload
+            state["validation_result"] = None
+            state["created_campaign_id"] = None
+            state["draft_meta"]["last_action"] = "build_campaign_payload_from_draft"
+
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "session_mode": state["session_mode"],
+                    "campaign_payload": campaign_payload,
+                },
+                200,
+            )
+            return
+
+        if self.path == "/validate_draft_campaign":
+            state = deep_copy_json(RUNTIME_STATE)
+            draft_campaign = state.get("draft_campaign")
+            if not isinstance(draft_campaign, dict):
+                self._send_json({"status": "error", "message": "draft_campaign is not initialized"}, 409)
+                return
+
+            campaign_payload, missing_fields = build_campaign_payload_from_draft_state(draft_campaign)
+            if missing_fields:
+                self._send_json({"status": "error", "missing_fields": missing_fields}, 400)
+                return
+
+            is_valid, errors = validate_campaign(campaign_payload)
+            state["campaign_payload"] = campaign_payload
+            state["validation_result"] = {"valid": is_valid, "errors": errors}
+            state["draft_meta"]["last_action"] = "validate_draft_campaign"
+            if is_valid:
+                state["session_mode"] = "awaiting_confirm_create"
+
+            save_runtime_state(state)
+
+            if is_valid:
+                self._send_json(
+                    {
+                        "status": "success",
+                        "valid": True,
+                        "errors": [],
+                    },
+                    200,
+                )
+            else:
+                self._send_json(
+                    {
+                        "status": "error",
+                        "valid": False,
+                        "errors": errors,
+                    },
+                    400,
+                )
+            return
+
+        if self.path == "/create_campaign_from_draft":
+            target = resolve_target(data)
+            if target != "production":
+                self._send_json({"status": "error", "message": "target must be 'production' for draft create flow"}, 400)
+                return
+
+            confirm = resolve_confirm(data)
+            if not confirm:
+                self._send_json(
+                    {"status": "error", "message": "production draft create requires explicit confirm=true", "target": "production"},
+                    400,
+                )
+                return
+
+            state = deep_copy_json(RUNTIME_STATE)
+            if state.get("session_mode") != "awaiting_confirm_create":
+                self._send_json(
+                    {"status": "error", "message": "session_mode must be awaiting_confirm_create before draft create"},
+                    409,
+                )
+                return
+
+            draft_campaign = state.get("draft_campaign")
+            if not isinstance(draft_campaign, dict):
+                self._send_json({"status": "error", "message": "draft_campaign is not initialized"}, 409)
+                return
+
+            campaign_payload, missing_fields = build_campaign_payload_from_draft_state(draft_campaign)
+            if missing_fields:
+                self._send_json({"status": "error", "missing_fields": missing_fields}, 400)
+                return
+
+            is_valid, errors = validate_campaign(campaign_payload)
+            state["campaign_payload"] = campaign_payload
+            state["validation_result"] = {"valid": is_valid, "errors": errors}
+            if not is_valid:
+                save_runtime_state(state)
+                self._send_json({"status": "error", "valid": False, "errors": errors}, 400)
+                return
+
+            start_date = resolve_start_date(campaign_payload)
+            client = YandexDirectClient.for_target("production")
+
+            try:
+                result = client.add_unified_campaign_production(
+                    name=campaign_payload["campaign_name"],
+                    start_date=start_date,
+                    goal_id=int(campaign_payload["metrica_goal_id"]),
+                    cpa_micros=rub_to_micros(campaign_payload["target_cpa_rub"]),
+                    weekly_budget_micros=rub_to_micros(campaign_payload["weekly_budget_rub"]),
+                    counter_id=DEFAULT_METRICA_COUNTER_ID,
+                )
+            except YandexDirectClientError as e:
+                self._send_json({"status": "error", "message": str(e), "target": "production"}, 502)
+                return
+
+            parsed = parse_add_result(result, "campaign")
+            if not parsed["ok"]:
+                payload = parsed["payload"]
+                payload["target"] = "production"
+                self._send_json(payload, parsed["status"])
+                return
+
+            state["created_campaign_id"] = parsed["payload"]["id"]
+            state["session_mode"] = "draft_campaign"
+            state["draft_meta"]["last_action"] = "create_campaign_from_draft"
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "campaign_id": parsed["payload"]["id"],
+                    "target": "production",
+                    "start_date": start_date,
+                    "campaign_payload": campaign_payload,
+                    "applied_defaults": {
+                        "metrica_counter_id": DEFAULT_METRICA_COUNTER_ID,
+                        "search_placement_types": dict(YandexDirectClient.DEFAULT_SEARCH_PLACEMENT_TYPES),
+                        "network_placement_types": dict(YandexDirectClient.DEFAULT_NETWORK_PLACEMENT_TYPES),
+                        "time_targeting_sent": False,
+                    },
+                },
+                200,
+            )
+            return
+
+        if self.path == "/create_sitelinks":
+            target = resolve_target(data)
+            if target not in ALLOWED_TARGETS:
+                self._send_json({"status": "error", "message": "target must be 'sandbox' or 'production'"}, 400)
+                return
+
+            confirm = resolve_confirm(data)
+            if target == "production" and not confirm:
+                self._send_json(
+                    {"status": "error", "message": "production sitelinks create requires explicit confirm=true", "target": "production"},
+                    400,
+                )
+                return
+
+            raw_sitelinks = data.get("sitelinks")
+            if not isinstance(raw_sitelinks, list):
+                self._send_json({"status": "error", "message": "sitelinks must be an array"}, 400)
+                return
+
+            sitelinks = []
+            for item in raw_sitelinks:
+                if not isinstance(item, dict):
+                    self._send_json({"status": "error", "message": "each sitelink must be an object"}, 400)
+                    return
+
+                title = item.get("title")
+                if not isinstance(title, str) or not title.strip():
+                    self._send_json({"status": "error", "message": "each sitelink title must be a non-empty string"}, 400)
+                    return
+
+                href = item.get("href")
+                if not isinstance(href, str) or not href.strip():
+                    self._send_json({"status": "error", "message": "each sitelink href must be a non-empty string"}, 400)
+                    return
+
+                sitelinks.append(
+                    {
+                        "Title": title.strip(),
+                        "Href": href.strip(),
+                    }
+                )
+
+            client = YandexDirectClient.for_target(target)
+
+            try:
+                result = client.add_sitelinks(sitelinks=sitelinks)
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": target},
+                    502,
+                )
+                return
+
+            parsed = parse_add_result(result, "sitelink_set")
+            if not parsed["ok"]:
+                self._send_json(parsed["payload"], parsed["status"])
+                return
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "sitelink_set_id": parsed["payload"]["id"],
+                    "raw": result,
+                },
+                200,
+            )
+            return
+
+        if self.path == "/create_negative_keyword_shared_set":
+            target = resolve_target(data)
+            if target not in ALLOWED_TARGETS:
+                self._send_json({"status": "error", "message": "target must be 'sandbox' or 'production'"}, 400)
+                return
+
+            negative_keywords = normalize_negative_keywords(data.get("negative_keywords"))
+            if negative_keywords is None or not negative_keywords:
+                self._send_json({"status": "error", "message": "negative_keywords must be a non-empty array of strings"}, 400)
+                return
+
+            confirm = resolve_confirm(data)
+            if target == "production" and not confirm:
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": "production negative keyword shared set create requires explicit confirm=true",
+                        "target": "production",
+                    },
+                    400,
+                )
+                return
+
+            shared_set_name = f"OpenClaw Negative Keywords {datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+            client = YandexDirectClient.for_target(target)
+
+            try:
+                result = client.add_negative_keyword_shared_set(
+                    name=shared_set_name,
+                    negative_keywords=negative_keywords,
+                )
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": target},
+                    502,
+                )
+                return
+
+            parsed = parse_add_result(result, "negative_keyword_shared_set")
+            if not parsed["ok"]:
+                payload = parsed["payload"]
+                payload["target"] = target
+                self._send_json(payload, parsed["status"])
+                return
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "shared_set_id": parsed["payload"]["id"],
+                },
+                200,
+            )
+            return
+
+        if self.path == "/attach_negative_keyword_shared_set_to_campaign":
+            target = resolve_target(data)
+            if target not in ALLOWED_TARGETS:
+                self._send_json({"status": "error", "message": "target must be 'sandbox' or 'production'"}, 400)
+                return
+
+            campaign_id = normalize_campaign_id(data.get("campaign_id"))
+            if campaign_id is None:
+                self._send_json({"status": "error", "message": "campaign_id must be a positive integer or numeric string"}, 400)
+                return
+
+            shared_set_id = normalize_positive_int_id(data.get("shared_set_id"))
+            if shared_set_id is None:
+                self._send_json({"status": "error", "message": "shared_set_id must be a positive integer or numeric string"}, 400)
+                return
+
+            confirm = resolve_confirm(data)
+            if target == "production" and not confirm:
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": "production campaign negative keyword shared set attach requires explicit confirm=true",
+                        "target": "production",
+                    },
+                    400,
+                )
+                return
+
+            client = YandexDirectClient.for_target(target)
+
+            try:
+                current_result = client.get_campaign_details(campaign_id)
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": target, "campaign_id": str(campaign_id)},
+                    502,
+                )
+                return
+
+            campaigns = current_result.get("result", {}).get("Campaigns", [])
+            if not campaigns:
+                self._send_json(
+                    {"status": "error", "message": "campaign not found", "target": target, "campaign_id": str(campaign_id), "raw": current_result},
+                    404,
+                )
+                return
+
+            current_shared_set_ids_raw = (
+                campaigns[0]
+                .get("UnifiedCampaign", {})
+                .get("NegativeKeywordSharedSetIds", {})
+                .get("Items", [])
+            )
+
+            current_shared_set_ids = []
+            for item in current_shared_set_ids_raw:
+                normalized_item = normalize_positive_int_id(item)
+                if normalized_item is not None:
+                    current_shared_set_ids.append(normalized_item)
+
+            if shared_set_id not in current_shared_set_ids:
+                updated_shared_set_ids = current_shared_set_ids + [shared_set_id]
+            else:
+                updated_shared_set_ids = current_shared_set_ids
+
+            if len(updated_shared_set_ids) > 3:
+                self._send_json(
+                    {"status": "error", "message": "NegativeKeywordSharedSetIds supports at most 3 items"},
+                    400,
+                )
+                return
+
+            try:
+                result = client.update_campaign_negative_keyword_shared_set_ids(
+                    campaign_id=campaign_id,
+                    shared_set_ids=updated_shared_set_ids,
+                )
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": target, "campaign_id": str(campaign_id)},
+                    502,
+                )
+                return
+
+            parsed = parse_update_result(result, "campaign")
+            if not parsed["ok"]:
+                payload = parsed["payload"]
+                payload["target"] = target
+                payload["campaign_id"] = str(campaign_id)
+                self._send_json(payload, parsed["status"])
+                return
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "campaign_id": str(campaign_id),
+                    "shared_set_id": str(shared_set_id),
+                    "shared_set_ids": [str(item) for item in updated_shared_set_ids],
+                },
+                200,
+            )
+            return
+
+        if self.path == "/set_campaign_tracking_params":
+            target = resolve_target(data)
+            if target not in ALLOWED_TARGETS:
+                self._send_json({"status": "error", "message": "target must be 'sandbox' or 'production'"}, 400)
+                return
+
+            campaign_id = normalize_campaign_id(data.get("campaign_id"))
+            if campaign_id is None:
+                self._send_json({"status": "error", "message": "campaign_id must be a positive integer or numeric string"}, 400)
+                return
+
+            tracking_params = data.get("tracking_params")
+            if not isinstance(tracking_params, str) or not tracking_params.strip():
+                self._send_json({"status": "error", "message": "tracking_params must be a non-empty string"}, 400)
+                return
+            tracking_params = tracking_params.strip()
+
+            confirm = resolve_confirm(data)
+            if target == "production" and not confirm:
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": "production campaign tracking params update requires explicit confirm=true",
+                        "target": "production",
+                    },
+                    400,
+                )
+                return
+
+            client = YandexDirectClient.for_target(target)
+
+            try:
+                current_result = client.get_campaign_details(campaign_id)
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": target, "campaign_id": str(campaign_id)},
+                    502,
+                )
+                return
+
+            campaigns = current_result.get("result", {}).get("Campaigns", [])
+            if not campaigns:
+                self._send_json(
+                    {"status": "error", "message": "campaign not found", "target": target, "campaign_id": str(campaign_id), "raw": current_result},
+                    404,
+                )
+                return
+
+            unified_campaign = campaigns[0].get("UnifiedCampaign", {})
+
+            current_counter_ids = []
+            for item in unified_campaign.get("CounterIds", {}).get("Items", []):
+                normalized_item = normalize_positive_int_id(item)
+                if normalized_item is not None:
+                    current_counter_ids.append(normalized_item)
+
+            current_shared_set_ids = []
+            for item in unified_campaign.get("NegativeKeywordSharedSetIds", {}).get("Items", []):
+                normalized_item = normalize_positive_int_id(item)
+                if normalized_item is not None:
+                    current_shared_set_ids.append(normalized_item)
+
+            try:
+                result = client.update_campaign_tracking_params(
+                    campaign_id=campaign_id,
+                    tracking_params=tracking_params,
+                    counter_ids=current_counter_ids,
+                    negative_keyword_shared_set_ids=current_shared_set_ids,
+                )
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": target, "campaign_id": str(campaign_id)},
+                    502,
+                )
+                return
+
+            parsed = parse_update_result(result, "campaign")
+            if not parsed["ok"]:
+                payload = parsed["payload"]
+                payload["target"] = target
+                payload["campaign_id"] = str(campaign_id)
+                self._send_json(payload, parsed["status"])
+                return
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "campaign_id": str(campaign_id),
+                    "tracking_params": tracking_params,
+                },
+                200,
+            )
+            return
+
+        if self.path == "/get_autotargeting":
+            target = resolve_target(data)
+            if target not in ALLOWED_TARGETS:
+                self._send_json({"status": "error", "message": "target must be 'sandbox' or 'production'"}, 400)
+                return
+
+            ad_group_id = normalize_ad_group_id(data.get("ad_group_id"))
+            if ad_group_id is None:
+                self._send_json({"status": "error", "message": "ad_group_id must be a positive integer or numeric string"}, 400)
+                return
+
+            client = YandexDirectClient.for_target(target)
+
+            try:
+                result = client.get_autotargeting_keywords(ad_group_id)
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": target, "ad_group_id": str(ad_group_id)},
+                    502,
+                )
+                return
+
+            raw_keywords = result.get("result", {}).get("Keywords", [])
+            autotargetings = []
+
+            for keyword in raw_keywords:
+                if keyword.get("Keyword") != "---autotargeting":
+                    continue
+
+                autotargetings.append(
+                    {
+                        "id": str(keyword.get("Id")),
+                        "ad_group_id": str(keyword.get("AdGroupId")),
+                        "campaign_id": str(keyword.get("CampaignId")),
+                        "status": keyword.get("Status"),
+                        "state": keyword.get("State"),
+                        "serving_status": keyword.get("ServingStatus"),
+                        "bid": keyword.get("Bid"),
+                        "context_bid": keyword.get("ContextBid"),
+                        "strategy_priority": keyword.get("StrategyPriority"),
+                        "autotargeting_search_bid_is_auto": keyword.get("AutotargetingSearchBidIsAuto"),
+                        "autotargeting_settings": keyword.get("AutotargetingSettings"),
+                    }
+                )
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "target": target,
+                    "ad_group_id": str(ad_group_id),
+                    "autotargetings": autotargetings,
+                },
+                200,
+            )
+            return
+
+        if self.path == "/update_autotargeting":
+            target = resolve_target(data)
+            if target not in ALLOWED_TARGETS:
+                self._send_json({"status": "error", "message": "target must be 'sandbox' or 'production'"}, 400)
+                return
+
+            ad_group_id = normalize_ad_group_id(data.get("ad_group_id"))
+            if ad_group_id is None:
+                self._send_json({"status": "error", "message": "ad_group_id must be a positive integer or numeric string"}, 400)
+                return
+
+            autotargeting_settings = normalize_autotargeting_settings(data.get("autotargeting_settings"))
+            if autotargeting_settings is None:
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": "autotargeting_settings must be an object with confirmed Categories and/or BrandOptions values YES/NO",
+                    },
+                    400,
+                )
+                return
+
+            confirm = resolve_confirm(data)
+            if target == "production" and not confirm:
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": "production autotargeting update requires explicit confirm=true",
+                        "target": "production",
+                    },
+                    400,
+                )
+                return
+
+            client = YandexDirectClient.for_target(target)
+
+            try:
+                current_result = client.get_autotargeting_keywords(ad_group_id)
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": target, "ad_group_id": str(ad_group_id)},
+                    502,
+                )
+                return
+
+            raw_keywords = current_result.get("result", {}).get("Keywords", [])
+            autotargetings = [keyword for keyword in raw_keywords if keyword.get("Keyword") == "---autotargeting"]
+
+            if not autotargetings:
+                self._send_json(
+                    {"status": "error", "message": "autotargeting not found", "target": target, "ad_group_id": str(ad_group_id)},
+                    404,
+                )
+                return
+
+            if len(autotargetings) > 1:
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": "multiple autotargeting objects found; cannot confirm which one to update",
+                        "target": target,
+                        "ad_group_id": str(ad_group_id),
+                    },
+                    409,
+                )
+                return
+
+            current_autotargeting = autotargetings[0]
+            autotargeting_id = normalize_positive_int_id(current_autotargeting.get("Id"))
+            if autotargeting_id is None:
+                self._send_json(
+                    {"status": "error", "message": "autotargeting id is missing in Keywords.get response", "raw": current_autotargeting},
+                    502,
+                )
+                return
+
+            merged_settings = {}
+            current_settings = current_autotargeting.get("AutotargetingSettings")
+
+            current_categories = current_settings.get("Categories") if isinstance(current_settings, dict) else None
+            if isinstance(current_categories, dict) and current_categories:
+                merged_settings["Categories"] = dict(current_categories)
+
+            current_brand_options = current_settings.get("BrandOptions") if isinstance(current_settings, dict) else None
+            if isinstance(current_brand_options, dict) and current_brand_options:
+                merged_settings["BrandOptions"] = dict(current_brand_options)
+
+            if "Categories" in autotargeting_settings:
+                merged_settings.setdefault("Categories", {}).update(autotargeting_settings["Categories"])
+
+            if "BrandOptions" in autotargeting_settings:
+                merged_settings.setdefault("BrandOptions", {}).update(autotargeting_settings["BrandOptions"])
+
+            try:
+                result = client.update_autotargeting_settings(
+                    autotargeting_id=autotargeting_id,
+                    autotargeting_settings=merged_settings,
+                )
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": target, "ad_group_id": str(ad_group_id)},
+                    502,
+                )
+                return
+
+            parsed = parse_update_result(result, "autotargeting")
+            if not parsed["ok"]:
+                payload = parsed["payload"]
+                payload["target"] = target
+                payload["ad_group_id"] = str(ad_group_id)
+                self._send_json(payload, parsed["status"])
+                return
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "target": target,
+                    "ad_group_id": str(ad_group_id),
+                    "autotargeting_id": str(autotargeting_id),
+                    "autotargeting_settings": merged_settings,
+                },
+                200,
+            )
+            return
+
+        if self.path == "/upload_ad_image":
+            target = resolve_target(data)
+            if target not in ALLOWED_TARGETS:
+                self._send_json({"status": "error", "message": "target must be 'sandbox' or 'production'"}, 400)
+                return
+
+            confirm = resolve_confirm(data)
+            if target == "production" and not confirm:
+                self._send_json(
+                    {"status": "error", "message": "production ad image upload requires explicit confirm=true", "target": "production"},
+                    400,
+                )
+                return
+
+            name = normalize_non_empty_string(data.get("name"))
+            if name is None:
+                self._send_json({"status": "error", "message": "name must be a non-empty string"}, 400)
+                return
+
+            image_data_base64 = normalize_non_empty_string(data.get("image_data_base64"))
+            if image_data_base64 is None:
+                self._send_json({"status": "error", "message": "image_data_base64 must be a non-empty string"}, 400)
+                return
+
+            try:
+                base64.b64decode(image_data_base64, validate=True)
+            except (binascii.Error, ValueError):
+                self._send_json({"status": "error", "message": "image_data_base64 must be valid base64"}, 400)
+                return
+
+            client = YandexDirectClient.for_target(target)
+
+            try:
+                result = client.add_ad_image(name=name, image_data_base64=image_data_base64)
+            except YandexDirectClientError as e:
+                self._send_json({"status": "error", "message": str(e), "target": target}, 502)
+                return
+
+            parsed = parse_ad_image_add_result(result)
+            if not parsed["ok"]:
+                payload = parsed["payload"]
+                payload["target"] = target
+                self._send_json(payload, parsed["status"])
+                return
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "target": target,
+                    "ad_image_hash": parsed["payload"]["ad_image_hash"],
+                    "warnings": parsed["payload"]["warnings"],
+                },
+                200,
+            )
+            return
+
         if self.path == "/create_ad":
             target = resolve_target(data)
             if target not in ALLOWED_TARGETS:
@@ -1003,6 +3142,13 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json({"status": "error", "message": "sitelink_set_id must be a positive integer or numeric string when provided"}, 400)
                     return
 
+            ad_image_hash = None
+            if "ad_image_hash" in data:
+                ad_image_hash = normalize_non_empty_string(data.get("ad_image_hash"))
+                if ad_image_hash is None:
+                    self._send_json({"status": "error", "message": "ad_image_hash must be a non-empty string when provided"}, 400)
+                    return
+
             confirm = resolve_confirm(data)
             if target == "production" and not confirm:
                 self._send_json(
@@ -1021,6 +3167,7 @@ class Handler(BaseHTTPRequestHandler):
                         text=text.strip(),
                         href=href.strip(),
                         display_url_path=display_url_path,
+                        ad_image_hash=ad_image_hash,
                         sitelink_set_id=sitelink_set_id,
                     )
                 else:
@@ -1030,6 +3177,7 @@ class Handler(BaseHTTPRequestHandler):
                         text=text.strip(),
                         href=href.strip(),
                         display_url_path=display_url_path,
+                        ad_image_hash=ad_image_hash,
                         sitelink_set_id=sitelink_set_id,
                     )
             except YandexDirectClientError as e:
@@ -1047,16 +3195,147 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(payload, parsed["status"])
                 return
 
-            self._send_json(
-                {
-                    "status": "success",
-                    "ad_id": parsed["payload"]["id"],
-                    "ad_group_id": str(ad_group_id),
-                    "target": target,
-                    "data": data,
-                },
-                200,
-            )
+            ad_details = None
+            try:
+                ad_result = client.get_ad_details(int(parsed["payload"]["id"]))
+                ads = ad_result.get("result", {}).get("Ads", [])
+                if ads:
+                    ad_details = ads[0]
+            except YandexDirectClientError:
+                ad_details = None
+
+            response_payload = {
+                "status": "success",
+                "ad_id": parsed["payload"]["id"],
+                "ad_group_id": str(ad_group_id),
+                "target": target,
+                "data": data,
+            }
+            if ad_details is not None:
+                response_payload["ad"] = ad_details
+
+            self._send_json(response_payload, 200)
+            return
+
+        if self.path == "/replace_ad_image":
+            target = resolve_target(data)
+            if target not in ALLOWED_TARGETS:
+                self._send_json({"status": "error", "message": "target must be 'sandbox' or 'production'"}, 400)
+                return
+
+            ad_id = normalize_ad_id(data.get("ad_id"))
+            if ad_id is None:
+                self._send_json({"status": "error", "message": "ad_id must be a positive integer or numeric string"}, 400)
+                return
+
+            ad_image_hash = normalize_non_empty_string(data.get("ad_image_hash"))
+            if ad_image_hash is None:
+                self._send_json({"status": "error", "message": "ad_image_hash must be a non-empty string"}, 400)
+                return
+
+            confirm = resolve_confirm(data)
+            if target == "production" and not confirm:
+                self._send_json(
+                    {"status": "error", "message": "production ad image replace requires explicit confirm=true", "target": "production"},
+                    400,
+                )
+                return
+
+            client = YandexDirectClient.for_target(target)
+
+            try:
+                result = client.update_text_ad_image(ad_id=ad_id, ad_image_hash=ad_image_hash)
+            except YandexDirectClientError as e:
+                self._send_json({"status": "error", "message": str(e), "target": target, "ad_id": str(ad_id)}, 502)
+                return
+
+            parsed = parse_update_result(result, "ad")
+            if not parsed["ok"]:
+                payload = parsed["payload"]
+                payload["target"] = target
+                payload["ad_id"] = str(ad_id)
+                self._send_json(payload, parsed["status"])
+                return
+
+            ad_details = None
+            try:
+                ad_result = client.get_ad_details(ad_id)
+                ads = ad_result.get("result", {}).get("Ads", [])
+                if ads:
+                    ad_details = ads[0]
+            except YandexDirectClientError:
+                ad_details = None
+
+            response_payload = {
+                "status": "success",
+                "target": target,
+                "ad_id": str(ad_id),
+                "ad_image_hash": ad_image_hash,
+                "warnings": parsed["payload"]["warnings"],
+                "result": result,
+            }
+            if ad_details is not None:
+                response_payload["ad"] = ad_details
+
+            self._send_json(response_payload, 200)
+            return
+
+        if self.path == "/remove_ad_image":
+            target = resolve_target(data)
+            if target not in ALLOWED_TARGETS:
+                self._send_json({"status": "error", "message": "target must be 'sandbox' or 'production'"}, 400)
+                return
+
+            ad_id = normalize_ad_id(data.get("ad_id"))
+            if ad_id is None:
+                self._send_json({"status": "error", "message": "ad_id must be a positive integer or numeric string"}, 400)
+                return
+
+            confirm = resolve_confirm(data)
+            if target == "production" and not confirm:
+                self._send_json(
+                    {"status": "error", "message": "production ad image remove requires explicit confirm=true", "target": "production"},
+                    400,
+                )
+                return
+
+            client = YandexDirectClient.for_target(target)
+
+            try:
+                result = client.update_text_ad_image(ad_id=ad_id, remove=True)
+            except YandexDirectClientError as e:
+                self._send_json({"status": "error", "message": str(e), "target": target, "ad_id": str(ad_id)}, 502)
+                return
+
+            parsed = parse_update_result(result, "ad")
+            if not parsed["ok"]:
+                payload = parsed["payload"]
+                payload["target"] = target
+                payload["ad_id"] = str(ad_id)
+                self._send_json(payload, parsed["status"])
+                return
+
+            ad_details = None
+            try:
+                ad_result = client.get_ad_details(ad_id)
+                ads = ad_result.get("result", {}).get("Ads", [])
+                if ads:
+                    ad_details = ads[0]
+            except YandexDirectClientError:
+                ad_details = None
+
+            response_payload = {
+                "status": "success",
+                "target": target,
+                "ad_id": str(ad_id),
+                "ad_image_hash": None,
+                "warnings": parsed["payload"]["warnings"],
+                "result": result,
+            }
+            if ad_details is not None:
+                response_payload["ad"] = ad_details
+
+            self._send_json(response_payload, 200)
             return
 
         if self.path == "/get_ad_status":
@@ -1160,6 +3439,8 @@ class Handler(BaseHTTPRequestHandler):
                         "text": text_ad.get("Text"),
                         "href": text_ad.get("Href"),
                         "display_url_path": text_ad.get("DisplayUrlPath"),
+                        "ad_image_hash": text_ad.get("AdImageHash"),
+                        "ad_image_moderation": text_ad.get("AdImageModeration"),
                     }
                 )
 
