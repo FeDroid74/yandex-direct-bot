@@ -1,9 +1,16 @@
 import base64
 import binascii
 from datetime import date, datetime, timedelta
+from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
+import mimetypes
 import os
+import re
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
 from typing import Optional
 
 from config import settings
@@ -19,6 +26,29 @@ ALLOWED_AUTOTARGETING_BRAND_OPTION_KEYS = {"WithoutBrands", "WithAdvertiserBrand
 DEFAULT_METRICA_COUNTER_ID = 99041859
 DEFAULT_GOAL_ID = 352606262
 STATE_FILE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "STATE.md"))
+ARTFARFOR_BASE_URL = "https://artfarfor.com/"
+ARTFARFOR_DOMAIN = "artfarfor.com"
+ARTFARFOR_IMAGE_ALLOWED_DOMAINS = {ARTFARFOR_DOMAIN, "static.insales-cdn.com"}
+DEFAULT_SITE_IMAGE_LIMIT = 3
+MAX_SITE_DISCOVERY_PAGES = 18
+MAX_SITE_LINKS_PER_PAGE = 20
+SITE_HTTP_TIMEOUT_SECONDS = 20
+SITE_THEME_STOPWORDS = {"и", "или", "для", "на", "в", "с", "к", "по", "из", "а", "the"}
+DECORATIVE_IMAGE_HINTS = (
+    "logo",
+    "favicon",
+    "icon",
+    "sprite",
+    "banner",
+    "no_image",
+    "payment",
+    "telegram",
+    "whatsapp",
+    "vk",
+    "loader",
+    "placeholder",
+)
+CRAWL_PATH_BANNED_HINTS = ("/contacts", "/delivery", "/oplata", "/cart", "/profile", "/login")
 SUPPORTED_SESSION_MODES = [
     "draft_campaign",
     "review_draft",
@@ -102,6 +132,22 @@ def normalize_ad_group_id(value):
 
 def normalize_ad_id(value):
     return normalize_positive_int_id(value)
+
+
+def normalize_non_negative_int(value):
+    if isinstance(value, bool):
+        return None
+
+    if isinstance(value, int):
+        return value if value >= 0 else None
+
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped.isdigit():
+            return None
+        return int(stripped)
+
+    return None
 
 
 def normalize_non_empty_string(value) -> Optional[str]:
@@ -407,6 +453,8 @@ def build_ad_group_draft(name: str) -> dict:
                 "title": f"{group_name} | ArtFarfor",
                 "text": "Авторские фарфоровые статуэтки и подарки ручной работы",
                 "final_url": "https://artfarfor.com",
+                "ad_image_hash": None,
+                "creative_spec": None,
             }
         ],
     }
@@ -448,6 +496,8 @@ def build_draft_campaign_from_theme(theme: str) -> dict:
                 "title": f"{normalized_theme} | ArtFarfor",
                 "text": "Подарочные фарфоровые статуэтки ручной работы",
                 "final_url": "https://artfarfor.com",
+                "ad_image_hash": None,
+                "creative_spec": None,
             }
         ],
         "autotargeting_settings": build_default_draft_autotargeting_settings(),
@@ -537,6 +587,12 @@ def build_default_runtime_state() -> dict:
         "last_proposal": None,
         "proposal_history": [],
         "approved_patterns": build_default_approved_patterns(),
+        "media_library": [],
+        "draft_media": [],
+        "last_uploaded_image_hash": None,
+        "creative_spec": None,
+        "render_task": None,
+        "render_result_url": None,
         "draft_meta": {
             "version": "v1",
             "last_action": None,
@@ -614,6 +670,12 @@ def load_runtime_state() -> dict:
                 "last_proposal",
                 "proposal_history",
                 "approved_patterns",
+                "media_library",
+                "draft_media",
+                "last_uploaded_image_hash",
+                "creative_spec",
+                "render_task",
+                "render_result_url",
                 "draft_meta",
             )
         }
@@ -624,6 +686,10 @@ def load_runtime_state() -> dict:
         state["proposal_history"] = []
     if not isinstance(state.get("approved_patterns"), dict):
         state["approved_patterns"] = build_default_approved_patterns()
+    if not isinstance(state.get("media_library"), list):
+        state["media_library"] = []
+    if not isinstance(state.get("draft_media"), list):
+        state["draft_media"] = []
     return state
 
 
@@ -635,6 +701,788 @@ def save_runtime_state(state: dict) -> None:
     RUNTIME_STATE = deep_copy_json(state)
     with open(STATE_FILE_PATH, "w", encoding="utf-8") as state_file:
         state_file.write(render_state_markdown(RUNTIME_STATE))
+
+
+def extract_media_state(state: dict) -> dict:
+    media_library = state.get("media_library")
+    draft_media = state.get("draft_media")
+
+    return {
+        "media_library": deep_copy_json(media_library) if isinstance(media_library, list) else [],
+        "draft_media": deep_copy_json(draft_media) if isinstance(draft_media, list) else [],
+        "last_uploaded_image_hash": state.get("last_uploaded_image_hash"),
+        "creative_spec": deep_copy_json(state.get("creative_spec")),
+        "render_task": deep_copy_json(state.get("render_task")),
+        "render_result_url": state.get("render_result_url"),
+    }
+
+
+def build_multipart_file_body(filename: str, file_bytes: bytes, field_name: str = "file", content_type: Optional[str] = None):
+    boundary = f"----CodexBoundary{uuid.uuid4().hex}"
+    resolved_content_type = normalize_non_empty_string(content_type) or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    body = b"".join(
+        [
+            f"--{boundary}\r\n".encode("utf-8"),
+            f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'.encode("utf-8"),
+            f"Content-Type: {resolved_content_type}\r\n\r\n".encode("utf-8"),
+            file_bytes,
+            f"\r\n--{boundary}--\r\n".encode("utf-8"),
+        ]
+    )
+    return body, f"multipart/form-data; boundary={boundary}"
+
+
+def upload_image_to_supa_api(filename: str, image_bytes: bytes, content_type: Optional[str] = None) -> dict:
+    body, multipart_content_type = build_multipart_file_body(
+        filename=filename,
+        file_bytes=image_bytes,
+        content_type=content_type,
+    )
+
+    request = urllib.request.Request(
+        settings.supa_upload_url,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {settings.supa_api_key}",
+            "Content-Type": multipart_content_type,
+            "Accept": "application/json",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            raw_body = response.read().decode("utf-8", errors="replace")
+            status_code = getattr(response, "status", 200)
+    except urllib.error.HTTPError as error:
+        raw_body = error.read().decode("utf-8", errors="replace")
+        try:
+            payload = json.loads(raw_body) if raw_body else {"message": error.reason}
+        except json.JSONDecodeError:
+            payload = {"raw": raw_body or str(error.reason)}
+        return {"ok": False, "status_code": error.code, "payload": payload}
+    except urllib.error.URLError as error:
+        return {"ok": False, "status_code": 502, "payload": {"message": str(error.reason)}}
+
+    try:
+        payload = json.loads(raw_body)
+    except json.JSONDecodeError:
+        payload = {"raw": raw_body}
+
+    if not isinstance(payload, dict):
+        payload = {"raw": raw_body}
+
+    return {"ok": 200 <= status_code < 300, "status_code": status_code, "payload": payload}
+
+
+class ArtFarforHTMLParser(HTMLParser):
+    def __init__(self, base_url: str):
+        super().__init__(convert_charrefs=True)
+        self.base_url = base_url
+        self.title_parts = []
+        self.heading_parts = []
+        self.text_parts = []
+        self.images = []
+        self.links = []
+        self.meta_image_urls = []
+        self._skip_depth = 0
+        self._current_link = None
+        self._current_heading_tag = None
+        self._current_heading_parts = []
+        self._in_title = False
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        lower_tag = tag.lower()
+
+        if lower_tag in {"script", "style", "noscript"}:
+            self._skip_depth += 1
+            return
+
+        if lower_tag == "title":
+            self._in_title = True
+            return
+
+        if lower_tag in {"h1", "h2", "h3"}:
+            self._current_heading_tag = lower_tag
+            self._current_heading_parts = []
+            return
+
+        if lower_tag == "a":
+            href = attributes.get("href")
+            if href:
+                self._current_link = {"href": href, "text_parts": []}
+            return
+
+        if lower_tag == "img":
+            src = attributes.get("src") or attributes.get("data-src") or attributes.get("data-original")
+            if src:
+                self.images.append(
+                    {
+                        "url": urllib.parse.urljoin(self.base_url, src),
+                        "alt": clean_inline_text(attributes.get("alt", "")),
+                        "class": clean_inline_text(attributes.get("class", "")),
+                    }
+                )
+            return
+
+        if lower_tag == "meta":
+            meta_key = (attributes.get("property") or attributes.get("name") or "").strip().lower()
+            content = attributes.get("content") or ""
+            if meta_key == "og:image" and content:
+                self.meta_image_urls.append(urllib.parse.urljoin(self.base_url, content))
+
+    def handle_endtag(self, tag):
+        lower_tag = tag.lower()
+
+        if lower_tag in {"script", "style", "noscript"}:
+            if self._skip_depth > 0:
+                self._skip_depth -= 1
+            return
+
+        if lower_tag == "title":
+            self._in_title = False
+            return
+
+        if lower_tag in {"h1", "h2", "h3"} and self._current_heading_tag == lower_tag:
+            heading_text = clean_inline_text(" ".join(self._current_heading_parts))
+            if heading_text:
+                self.heading_parts.append(heading_text)
+            self._current_heading_tag = None
+            self._current_heading_parts = []
+            return
+
+        if lower_tag == "a" and self._current_link is not None:
+            link_text = clean_inline_text(" ".join(self._current_link["text_parts"]))
+            self.links.append(
+                {
+                    "url": urllib.parse.urljoin(self.base_url, self._current_link["href"]),
+                    "text": link_text,
+                }
+            )
+            self._current_link = None
+
+    def handle_data(self, data):
+        if self._skip_depth > 0:
+            return
+
+        text = clean_inline_text(data)
+        if not text:
+            return
+
+        self.text_parts.append(text)
+
+        if self._in_title:
+            self.title_parts.append(text)
+
+        if self._current_heading_tag is not None:
+            self._current_heading_parts.append(text)
+
+        if self._current_link is not None:
+            self._current_link["text_parts"].append(text)
+
+
+def clean_inline_text(value) -> str:
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"\s+", " ", value.replace("\xa0", " ")).strip()
+
+
+def normalize_match_text(value) -> str:
+    return clean_inline_text(value).lower().replace("ё", "е")
+
+
+def tokenize_match_text(value) -> list:
+    return [
+        token
+        for token in re.findall(r"[0-9a-zа-я]+", normalize_match_text(value))
+        if len(token) > 1 and token not in SITE_THEME_STOPWORDS
+    ]
+
+
+def is_artfarfor_domain_url(url: str) -> bool:
+    if not isinstance(url, str) or not url.strip():
+        return False
+    parsed = urllib.parse.urlsplit(url)
+    host = (parsed.netloc or "").split("@")[-1].split(":")[0].lower()
+    return bool(host) and (host == ARTFARFOR_DOMAIN or host.endswith(f".{ARTFARFOR_DOMAIN}"))
+
+
+def is_allowed_site_image_domain_url(url: str) -> bool:
+    if not isinstance(url, str) or not url.strip():
+        return False
+    parsed = urllib.parse.urlsplit(url)
+    host = (parsed.netloc or "").split("@")[-1].split(":")[0].lower()
+    return bool(host) and host in ARTFARFOR_IMAGE_ALLOWED_DOMAINS
+
+
+def normalize_artfarfor_url(url: str, base_url: str = ARTFARFOR_BASE_URL) -> Optional[str]:
+    if not isinstance(url, str) or not url.strip():
+        return None
+    resolved = urllib.parse.urljoin(base_url, url.strip())
+    parsed = urllib.parse.urlsplit(resolved)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    if not is_artfarfor_domain_url(resolved):
+        return None
+    normalized_path = parsed.path or "/"
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc.lower(), normalized_path, "", ""))
+
+
+def normalize_site_image_url(url: str, base_url: str = ARTFARFOR_BASE_URL) -> Optional[str]:
+    if not isinstance(url, str) or not url.strip():
+        return None
+    resolved = urllib.parse.urljoin(base_url, url.strip())
+    parsed = urllib.parse.urlsplit(resolved)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    if not is_allowed_site_image_domain_url(resolved):
+        return None
+    normalized_path = parsed.path or "/"
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc.lower(), normalized_path, "", ""))
+
+
+def is_crawl_candidate_url(url: str) -> bool:
+    normalized = normalize_artfarfor_url(url)
+    if normalized is None:
+        return False
+    path = urllib.parse.urlsplit(normalized).path.lower()
+    if any(hint in path for hint in CRAWL_PATH_BANNED_HINTS):
+        return False
+    return path == "/" or path.startswith("/collection") or path.startswith("/product")
+
+
+def fetch_site_url(url: str, binary: bool = False) -> dict:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; OpenClawSiteImageBot/1.0)",
+            "Accept": "*/*" if binary else "text/html,application/xhtml+xml",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=SITE_HTTP_TIMEOUT_SECONDS) as response:
+            body = response.read()
+            content_type = response.headers.get("Content-Type", "")
+            charset = response.headers.get_content_charset() or "utf-8"
+    except urllib.error.HTTPError as error:
+        raw_body = error.read().decode("utf-8", errors="replace")
+        return {"ok": False, "status_code": error.code, "payload": {"message": str(error.reason), "raw": raw_body}}
+    except urllib.error.URLError as error:
+        return {"ok": False, "status_code": 502, "payload": {"message": str(error.reason)}}
+
+    if binary:
+        return {"ok": True, "status_code": 200, "content_type": content_type, "body": body}
+
+    try:
+        text = body.decode(charset, errors="replace")
+    except LookupError:
+        text = body.decode("utf-8", errors="replace")
+
+    return {"ok": True, "status_code": 200, "content_type": content_type, "text": text}
+
+
+def parse_artfarfor_page(url: str, html_text: str) -> dict:
+    parser = ArtFarforHTMLParser(url)
+    parser.feed(html_text)
+    parser.close()
+    return {
+        "url": url,
+        "title": clean_inline_text(" ".join(parser.title_parts)),
+        "headings": [item for item in parser.heading_parts if item],
+        "text": clean_inline_text(" ".join(parser.text_parts)),
+        "images": parser.images,
+        "meta_image_urls": parser.meta_image_urls,
+        "links": parser.links,
+    }
+
+
+def build_theme_profile(theme: str) -> dict:
+    normalized = normalize_match_text(theme)
+    tokens = tokenize_match_text(theme)
+    match_type = "category"
+    if re.search(r"[a-z]", normalized):
+        match_type = "brand"
+    elif any(token.startswith(prefix) for token in tokens for prefix in ("подар", "жен", "мам", "юбил")):
+        match_type = "gift"
+    elif any(token.startswith(prefix) for token in tokens for prefix in ("немец", "герман", "англ", "британ", "итал", "франц", "испан")):
+        match_type = "origin"
+
+    origin_terms = []
+    if match_type == "origin":
+        if any(token.startswith(prefix) for token in tokens for prefix in ("немец", "герман")):
+            origin_terms.extend(["германия", "немец"])
+        if any(token.startswith(prefix) for token in tokens for prefix in ("англ", "британ")):
+            origin_terms.extend(["англия", "британ"])
+        if any(token.startswith(prefix) for token in tokens for prefix in ("итал",)):
+            origin_terms.extend(["италия", "итали"])
+        if any(token.startswith(prefix) for token in tokens for prefix in ("франц",)):
+            origin_terms.extend(["франция", "франц"])
+        if any(token.startswith(prefix) for token in tokens for prefix in ("испан",)):
+            origin_terms.extend(["испания", "испан"])
+
+    category_terms = []
+    for token in tokens:
+        if "фарфор" in token:
+            category_terms.append("фарфор")
+        elif token.startswith("стату"):
+            category_terms.append("статуэт")
+        elif token.startswith("тарел"):
+            category_terms.append("тарел")
+        elif token.startswith("ваз"):
+            category_terms.append("ваз")
+        elif token.startswith("подар"):
+            category_terms.append("подар")
+    if not category_terms:
+        category_terms = tokens[:]
+
+    gift_terms = [token for token in tokens if token.startswith("подар")]
+    audience_terms = []
+    for token in tokens:
+        if token.startswith("жен"):
+            audience_terms.extend(["женщ", "для нее", "для неё"])
+        elif token.startswith("мам"):
+            audience_terms.append("мам")
+        elif token.startswith("юбил"):
+            audience_terms.append("юбил")
+
+    return {
+        "theme": clean_inline_text(theme),
+        "normalized": normalized,
+        "tokens": tokens,
+        "match_type": match_type,
+        "origin_terms": list(dict.fromkeys(origin_terms)),
+        "category_terms": list(dict.fromkeys(category_terms)),
+        "gift_terms": list(dict.fromkeys(gift_terms)),
+        "audience_terms": list(dict.fromkeys(audience_terms)),
+    }
+
+
+def find_matched_terms(source_text: str, terms: list) -> list:
+    matched = []
+    normalized_source = normalize_match_text(source_text)
+    for term in terms:
+        normalized_term = normalize_match_text(term)
+        if normalized_term and normalized_term in normalized_source and normalized_term not in matched:
+            matched.append(normalized_term)
+    return matched
+
+
+def add_evidence_line(evidence: list, source_name: str, message: str) -> None:
+    line = f"{source_name} contains {message}"
+    if line not in evidence:
+        evidence.append(line)
+
+
+def collect_page_match_evidence(page: dict, theme_profile: dict) -> list:
+    normalized_theme = theme_profile["normalized"]
+    sources = [
+        ("title", page.get("title", "")),
+        ("heading", " ".join(page.get("headings", []))),
+        ("page text", page.get("text", "")),
+    ]
+    evidence = []
+
+    if theme_profile["match_type"] == "brand":
+        for source_name, source_value in sources[:2]:
+            if normalized_theme and normalized_theme in normalize_match_text(source_value):
+                add_evidence_line(evidence, source_name, theme_profile["theme"])
+        return evidence
+
+    if theme_profile["match_type"] == "gift":
+        for source_name, source_value in sources:
+            normalized_source = normalize_match_text(source_value)
+            if normalized_theme and normalized_theme in normalized_source:
+                add_evidence_line(evidence, source_name, theme_profile["theme"])
+                continue
+            matched_gift_terms = find_matched_terms(normalized_source, theme_profile["gift_terms"])
+            matched_audience_terms = find_matched_terms(normalized_source, theme_profile["audience_terms"])
+            if matched_gift_terms and matched_audience_terms:
+                add_evidence_line(evidence, source_name, matched_gift_terms[0])
+                add_evidence_line(evidence, source_name, matched_audience_terms[0])
+        return evidence
+
+    if theme_profile["match_type"] == "origin":
+        for source_name, source_value in sources:
+            normalized_source = normalize_match_text(source_value)
+            if normalized_theme and normalized_theme in normalized_source:
+                add_evidence_line(evidence, source_name, theme_profile["theme"])
+                continue
+            matched_origin_terms = find_matched_terms(normalized_source, theme_profile["origin_terms"])
+            matched_category_terms = find_matched_terms(normalized_source, theme_profile["category_terms"])
+            if matched_origin_terms and matched_category_terms:
+                add_evidence_line(evidence, source_name, matched_origin_terms[0])
+                add_evidence_line(evidence, source_name, matched_category_terms[0])
+        return evidence
+
+    combined_text = normalize_match_text(" ".join(source for _, source in sources))
+    if normalized_theme and normalized_theme in combined_text:
+        add_evidence_line(evidence, "page text", theme_profile["theme"])
+        return evidence
+
+    matched_category_terms = find_matched_terms(combined_text, theme_profile["category_terms"])
+    if matched_category_terms and len(matched_category_terms) >= min(2, len(theme_profile["category_terms"])):
+        for matched_term in matched_category_terms[:3]:
+            add_evidence_line(evidence, "page text", matched_term)
+
+    return evidence
+
+
+def is_decorative_site_image(image_item: dict) -> bool:
+    image_text = normalize_match_text(
+        " ".join(
+            [
+                image_item.get("url", ""),
+                image_item.get("alt", ""),
+                image_item.get("class", ""),
+            ]
+        )
+    )
+    return any(hint in image_text for hint in DECORATIVE_IMAGE_HINTS)
+
+
+def select_best_site_image(page: dict, theme_profile: dict) -> Optional[dict]:
+    candidates = []
+    seen_urls = set()
+
+    for meta_image_url in page.get("meta_image_urls", []):
+        normalized_url = normalize_site_image_url(meta_image_url, page["url"])
+        if normalized_url and normalized_url not in seen_urls:
+            candidates.append({"url": normalized_url, "alt": "", "class": "", "source_type": "meta"})
+            seen_urls.add(normalized_url)
+
+    for image_item in page.get("images", []):
+        normalized_url = normalize_site_image_url(image_item.get("url", ""), page["url"])
+        if normalized_url and normalized_url not in seen_urls:
+            candidate = dict(image_item)
+            candidate["url"] = normalized_url
+            candidate["source_type"] = "img"
+            candidates.append(candidate)
+            seen_urls.add(normalized_url)
+
+    scored_candidates = []
+    for candidate in candidates:
+        if is_decorative_site_image(candidate):
+            continue
+
+        candidate_text = normalize_match_text(
+            " ".join(
+                [
+                    candidate.get("alt", ""),
+                    page.get("title", ""),
+                    " ".join(page.get("headings", [])),
+                ]
+            )
+        )
+        score = 0
+        if candidate.get("source_type") == "meta":
+            score += 5
+        if theme_profile["normalized"] and theme_profile["normalized"] in candidate_text:
+            score += 8
+        for token in theme_profile["tokens"]:
+            if token in candidate_text:
+                score += 2
+        if normalize_match_text(candidate.get("alt", "")):
+            score += 1
+        scored_candidates.append((score, candidate))
+
+    if not scored_candidates:
+        return None
+
+    scored_candidates.sort(key=lambda item: item[0], reverse=True)
+    return scored_candidates[0][1]
+
+
+def score_site_link(link_item: dict, theme_profile: dict) -> int:
+    url = normalize_artfarfor_url(link_item.get("url", ""))
+    if url is None or not is_crawl_candidate_url(url):
+        return -1
+
+    combined = normalize_match_text(f"{link_item.get('text', '')} {url}")
+    score = 0
+    if theme_profile["normalized"] and theme_profile["normalized"] in combined:
+        score += 10
+    for token in theme_profile["tokens"]:
+        if token in combined:
+            score += 2
+    for token in theme_profile["origin_terms"] + theme_profile["gift_terms"] + theme_profile["audience_terms"]:
+        if token in combined:
+            score += 2
+    path = urllib.parse.urlsplit(url).path.lower()
+    if path.startswith("/collection"):
+        score += 1
+    if path.startswith("/product"):
+        score += 2
+    return score
+
+
+def build_site_match_from_page(page: dict, theme_profile: dict) -> Optional[dict]:
+    if urllib.parse.urlsplit(page["url"]).path in {"", "/"}:
+        return None
+
+    evidence = collect_page_match_evidence(page, theme_profile)
+    if not evidence:
+        return None
+
+    image_candidate = select_best_site_image(page, theme_profile)
+    if image_candidate is None:
+        return None
+
+    title = clean_inline_text(image_candidate.get("alt") or page.get("title") or " ".join(page.get("headings", [])))
+    if not title:
+        return None
+
+    return {
+        "page_url": page["url"],
+        "image_url": image_candidate["url"],
+        "title": title,
+        "evidence": evidence[:4],
+        "match_type": theme_profile["match_type"],
+    }
+
+
+def find_site_images_for_theme_internal(theme: str, limit: int = DEFAULT_SITE_IMAGE_LIMIT) -> dict:
+    theme_profile = build_theme_profile(theme)
+    homepage_result = fetch_site_url(ARTFARFOR_BASE_URL)
+    if not homepage_result["ok"]:
+        return {"ok": False, "status": homepage_result["status_code"], "payload": {"status": "error", "message": "failed to fetch artfarfor.com homepage", "raw": homepage_result["payload"]}}
+
+    queue = [(ARTFARFOR_BASE_URL, 0)]
+    queued_urls = {ARTFARFOR_BASE_URL}
+    visited_urls = set()
+    matches = []
+    seen_match_keys = set()
+
+    while queue and len(visited_urls) < MAX_SITE_DISCOVERY_PAGES and len(matches) < limit:
+        current_url, depth = queue.pop(0)
+        queued_urls.discard(current_url)
+        if current_url in visited_urls:
+            continue
+
+        page_result = homepage_result if current_url == ARTFARFOR_BASE_URL else fetch_site_url(current_url)
+        if not page_result["ok"]:
+            visited_urls.add(current_url)
+            continue
+
+        page = parse_artfarfor_page(current_url, page_result["text"])
+        visited_urls.add(current_url)
+
+        maybe_match = build_site_match_from_page(page, theme_profile)
+        if maybe_match is not None:
+            match_key = (maybe_match["page_url"], maybe_match["image_url"])
+            if match_key not in seen_match_keys:
+                matches.append(maybe_match)
+                seen_match_keys.add(match_key)
+                if len(matches) >= limit:
+                    break
+
+        if depth >= 2:
+            continue
+
+        ranked_links = []
+        for link_item in page.get("links", []):
+            normalized_url = normalize_artfarfor_url(link_item.get("url", ""), page["url"])
+            if normalized_url is None or normalized_url in visited_urls or normalized_url in queued_urls:
+                continue
+            score = score_site_link({"url": normalized_url, "text": link_item.get("text", "")}, theme_profile)
+            if score < 0:
+                continue
+            ranked_links.append((score, normalized_url))
+
+        ranked_links.sort(key=lambda item: item[0], reverse=True)
+        for score, next_url in ranked_links[:MAX_SITE_LINKS_PER_PAGE]:
+            if score <= 0 and depth > 0:
+                continue
+            queue.append((next_url, depth + 1))
+            queued_urls.add(next_url)
+
+    return {"ok": True, "status": 200, "payload": {"status": "success" if matches else "no_match", "theme": theme_profile["theme"], "matches": matches[:limit]}}
+
+
+def download_site_image_bytes(image_url: str) -> dict:
+    normalized_url = normalize_site_image_url(image_url)
+    if normalized_url is None:
+        return {"ok": False, "status": 400, "payload": {"status": "error", "message": "image_url must belong to artfarfor.com or static.insales-cdn.com"}}
+
+    result = fetch_site_url(normalized_url, binary=True)
+    if not result["ok"]:
+        return {"ok": False, "status": result["status_code"], "payload": {"status": "error", "message": "failed to download image from allowed site image host", "raw": result["payload"]}}
+
+    content_type = result.get("content_type", "")
+    if content_type and not content_type.lower().startswith("image/"):
+        return {"ok": False, "status": 400, "payload": {"status": "error", "message": "downloaded URL is not an image", "raw": {"content_type": content_type}}}
+
+    return {
+        "ok": True,
+        "status": 200,
+        "payload": {
+            "image_bytes": result["body"],
+            "content_type": content_type,
+            "filename": os.path.basename(urllib.parse.urlsplit(normalized_url).path) or "artfarfor-site-image.jpg",
+            "image_url": normalized_url,
+        },
+    }
+
+
+def upload_ad_image_via_direct(target: str, name: str, image_data_base64: str) -> dict:
+    client = YandexDirectClient.for_target(target)
+    try:
+        result = client.add_ad_image(name=name, image_data_base64=image_data_base64)
+    except YandexDirectClientError as e:
+        return {"ok": False, "status": 502, "payload": {"status": "error", "message": str(e), "target": target}}
+
+    parsed = parse_ad_image_add_result(result)
+    if not parsed["ok"]:
+        payload = parsed["payload"]
+        payload["target"] = target
+        return {"ok": False, "status": parsed["status"], "payload": payload}
+
+    return {
+        "ok": True,
+        "status": 200,
+        "payload": {
+            "result": result,
+            "ad_image_hash": parsed["payload"]["ad_image_hash"],
+            "warnings": parsed["payload"]["warnings"],
+        },
+    }
+
+
+def add_yandex_uploaded_image_to_state(state: dict, ad_image_hash: str) -> dict:
+    if not isinstance(state.get("media_library"), list):
+        state["media_library"] = []
+    state["last_uploaded_image_hash"] = ad_image_hash
+    state["media_library"].append(
+        {
+            "type": "image",
+            "source": "yandex_direct_upload",
+            "ad_image_hash": ad_image_hash,
+        }
+    )
+    return state
+
+
+def link_image_hash_to_draft_state(state: dict, scope: str, ad_index: int, ad_group_index: Optional[int], ad_image_hash: str) -> dict:
+    draft_campaign = state.get("draft_campaign")
+    if not isinstance(draft_campaign, dict):
+        return {"ok": False, "status": 409, "payload": {"status": "error", "message": "draft_campaign is not initialized"}}
+
+    draft_ad, link_ref = resolve_draft_ad_reference(
+        draft_campaign=draft_campaign,
+        scope=scope,
+        ad_index=ad_index,
+        ad_group_index=ad_group_index,
+    )
+    if draft_ad is None or link_ref is None:
+        return {"ok": False, "status": 400, "payload": {"status": "error", "message": "draft ad not found for provided scope/indexes"}}
+
+    draft_ad["ad_image_hash"] = ad_image_hash
+    creative_spec = state.get("creative_spec")
+    if isinstance(creative_spec, dict):
+        draft_ad["creative_spec"] = deep_copy_json(creative_spec)
+
+    if not isinstance(state.get("draft_media"), list):
+        state["draft_media"] = []
+    draft_media_item = {
+        "type": "image",
+        "scope": link_ref["scope"],
+        "ad_image_hash": ad_image_hash,
+        **({} if "ad_group_index" not in link_ref else {"ad_group_index": link_ref["ad_group_index"]}),
+        "ad_index": link_ref["ad_index"],
+    }
+    if isinstance(creative_spec, dict):
+        draft_media_item["creative_spec"] = deep_copy_json(creative_spec)
+
+    matched_item = None
+    for existing_item in state["draft_media"]:
+        if not isinstance(existing_item, dict):
+            continue
+        if existing_item.get("scope") != link_ref["scope"]:
+            continue
+        if existing_item.get("ad_index") != link_ref["ad_index"]:
+            continue
+        if existing_item.get("ad_image_hash") != ad_image_hash:
+            continue
+        if link_ref["scope"] == "ad_group" and existing_item.get("ad_group_index") != link_ref.get("ad_group_index"):
+            continue
+        if link_ref["scope"] == "campaign" and existing_item.get("ad_group_index") is not None:
+            continue
+        matched_item = existing_item
+        break
+
+    if matched_item is None:
+        state["draft_media"].append(draft_media_item)
+    elif "creative_spec" in draft_media_item:
+        matched_item["creative_spec"] = deep_copy_json(draft_media_item["creative_spec"])
+
+    state["draft_campaign"] = draft_campaign
+    return {
+        "ok": True,
+        "status": 200,
+        "payload": {
+            "state": state,
+            "draft_fragment": draft_ad,
+            "draft_campaign": state["draft_campaign"],
+            "draft_media": state["draft_media"],
+        },
+    }
+
+
+def normalize_draft_final_url(value) -> Optional[str]:
+    normalized = normalize_non_empty_string(value)
+    if normalized is None:
+        return None
+    if not normalized.startswith("https://artfarfor.com"):
+        return None
+    return normalized
+
+
+def resolve_draft_ad_reference(
+    draft_campaign: dict,
+    scope: str,
+    ad_index: int,
+    ad_group_index: Optional[int] = None,
+):
+    if scope == "campaign":
+        ads = draft_campaign.get("ads")
+        if not isinstance(ads, list) or ad_index >= len(ads):
+            return None, None
+        ad = ads[ad_index]
+        if not isinstance(ad, dict):
+            return None, None
+        return ad, {"scope": "campaign", "ad_index": ad_index}
+
+    if scope == "ad_group":
+        if ad_group_index is None:
+            return None, None
+        ad_groups = draft_campaign.get("ad_groups")
+        if not isinstance(ad_groups, list) or ad_group_index >= len(ad_groups):
+            return None, None
+        ad_group = ad_groups[ad_group_index]
+        if not isinstance(ad_group, dict):
+            return None, None
+        ads = ad_group.get("ads")
+        if not isinstance(ads, list) or ad_index >= len(ads):
+            return None, None
+        ad = ads[ad_index]
+        if not isinstance(ad, dict):
+            return None, None
+        return ad, {"scope": "ad_group", "ad_group_index": ad_group_index, "ad_index": ad_index}
+
+    return None, None
+
+
+def resolve_draft_ad_group_reference(draft_campaign: dict, ad_group_index: int):
+    ad_groups = draft_campaign.get("ad_groups")
+    if not isinstance(ad_groups, list) or ad_group_index >= len(ad_groups):
+        return None
+
+    ad_group = ad_groups[ad_group_index]
+    if not isinstance(ad_group, dict):
+        return None
+
+    return ad_group
 
 
 def build_campaign_payload_from_draft_state(draft_campaign: dict):
@@ -2283,6 +3131,307 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if self.path == "/save_creative_spec":
+            creative_spec = data.get("creative_spec")
+            if not isinstance(creative_spec, dict) or not creative_spec:
+                self._send_json({"status": "error", "message": "creative_spec must be a non-empty object"}, 400)
+                return
+
+            state = deep_copy_json(RUNTIME_STATE)
+            state["creative_spec"] = deep_copy_json(creative_spec)
+            state["draft_meta"]["last_action"] = "save_creative_spec"
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "creative_spec": state["creative_spec"],
+                },
+                200,
+            )
+            return
+
+        if self.path == "/get_creative_spec":
+            state = deep_copy_json(RUNTIME_STATE)
+            self._send_json(
+                {
+                    "status": "success",
+                    "creative_spec": state.get("creative_spec"),
+                },
+                200,
+            )
+            return
+
+        if self.path == "/get_supa_status":
+            self._send_json(
+                {
+                    "status": "success",
+                    "supa": {
+                        "configured": settings.is_supa_configured,
+                        "base_url": settings.supa_base_url,
+                        "has_api_key": bool(settings.supa_api_key.strip()),
+                        "project_id": settings.supa_project_id,
+                    },
+                },
+                200,
+            )
+            return
+
+        if self.path == "/upload_image_to_supa":
+            if not settings.is_supa_configured or not settings.supa_upload_url:
+                self._send_json({"status": "error", "message": "Supa is not configured"}, 400)
+                return
+
+            image_base64 = normalize_non_empty_string(data.get("image_base64")) or normalize_non_empty_string(data.get("image_data_base64"))
+            if image_base64 is None:
+                self._send_json({"status": "error", "message": "image_base64 must be a non-empty string"}, 400)
+                return
+
+            filename = normalize_non_empty_string(data.get("filename")) or normalize_non_empty_string(data.get("name"))
+            if filename is None:
+                self._send_json({"status": "error", "message": "filename must be a non-empty string"}, 400)
+                return
+
+            content_type = normalize_non_empty_string(data.get("content_type"))
+
+            try:
+                image_bytes = base64.b64decode(image_base64, validate=True)
+            except (binascii.Error, ValueError):
+                self._send_json({"status": "error", "message": "image_base64 must be valid base64"}, 400)
+                return
+
+            result = upload_image_to_supa_api(
+                filename=filename,
+                image_bytes=image_bytes,
+                content_type=content_type,
+            )
+
+            if not result["ok"]:
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": "Supa upload failed",
+                        "raw": result["payload"],
+                    },
+                    result["status_code"] if isinstance(result["status_code"], int) else 502,
+                )
+                return
+
+            payload = result["payload"]
+            upload_url = payload.get("url") if isinstance(payload, dict) else None
+            if payload.get("result") != "success" or not isinstance(upload_url, str) or not upload_url.strip():
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": "unexpected Supa upload response",
+                        "raw": payload,
+                    },
+                    502,
+                )
+                return
+
+            state = deep_copy_json(RUNTIME_STATE)
+            if not isinstance(state.get("media_library"), list):
+                state["media_library"] = []
+            state["render_result_url"] = upload_url.strip()
+            state["media_library"].append(
+                {
+                    "type": "image",
+                    "source": "supa_upload",
+                    "url": state["render_result_url"],
+                }
+            )
+            state["draft_meta"]["last_action"] = "upload_image_to_supa"
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "supa_upload": payload,
+                    "filename": filename,
+                    "stored_in_state": True,
+                },
+                200,
+            )
+            return
+
+        if self.path == "/get_media_state":
+            state = deep_copy_json(RUNTIME_STATE)
+            self._send_json(
+                {
+                    "status": "success",
+                    "media_state": extract_media_state(state),
+                },
+                200,
+            )
+            return
+
+        if self.path == "/get_media_library":
+            state = deep_copy_json(RUNTIME_STATE)
+            self._send_json(
+                {
+                    "status": "success",
+                    "media_library": extract_media_state(state)["media_library"],
+                },
+                200,
+            )
+            return
+
+        if self.path == "/get_draft_media":
+            state = deep_copy_json(RUNTIME_STATE)
+            self._send_json(
+                {
+                    "status": "success",
+                    "draft_media": extract_media_state(state)["draft_media"],
+                },
+                200,
+            )
+            return
+
+        if self.path == "/find_site_images_for_theme":
+            theme = normalize_non_empty_string(data.get("theme"))
+            if theme is None:
+                self._send_json({"status": "error", "message": "theme must be a non-empty string"}, 400)
+                return
+
+            limit = normalize_non_negative_int(data.get("limit"))
+            if limit is None or limit == 0:
+                limit = DEFAULT_SITE_IMAGE_LIMIT
+
+            discovery = find_site_images_for_theme_internal(theme=theme, limit=min(limit, 10))
+            self._send_json(discovery["payload"], discovery["status"])
+            return
+
+        if self.path == "/apply_site_image_to_draft_ad":
+            theme = normalize_non_empty_string(data.get("theme"))
+            if theme is None:
+                self._send_json({"status": "error", "message": "theme must be a non-empty string"}, 400)
+                return
+
+            scope = data.get("scope")
+            if scope not in {"campaign", "ad_group"}:
+                self._send_json({"status": "error", "message": "scope must be 'campaign' or 'ad_group'"}, 400)
+                return
+
+            ad_index = normalize_non_negative_int(data.get("ad_index"))
+            if ad_index is None:
+                self._send_json({"status": "error", "message": "ad_index must be a non-negative integer or numeric string"}, 400)
+                return
+
+            ad_group_index = None
+            if scope == "ad_group":
+                ad_group_index = normalize_non_negative_int(data.get("ad_group_index"))
+                if ad_group_index is None:
+                    self._send_json({"status": "error", "message": "ad_group_index must be a non-negative integer or numeric string for scope=ad_group"}, 400)
+                    return
+
+            current_state = deep_copy_json(RUNTIME_STATE)
+            current_draft_campaign = current_state.get("draft_campaign")
+            if not isinstance(current_draft_campaign, dict):
+                self._send_json({"status": "error", "message": "draft_campaign is not initialized"}, 409)
+                return
+            existing_draft_ad, _ = resolve_draft_ad_reference(
+                draft_campaign=current_draft_campaign,
+                scope=scope,
+                ad_index=ad_index,
+                ad_group_index=ad_group_index,
+            )
+            if existing_draft_ad is None:
+                self._send_json({"status": "error", "message": "draft ad not found for provided scope/indexes"}, 400)
+                return
+
+            target = resolve_target({"target": data.get("target", "production")})
+            if target not in ALLOWED_TARGETS:
+                self._send_json({"status": "error", "message": "target must be 'sandbox' or 'production'"}, 400)
+                return
+
+            confirm = resolve_confirm(data)
+            if target == "production" and not confirm:
+                self._send_json(
+                    {"status": "error", "message": "production site image apply requires explicit confirm=true", "target": "production"},
+                    400,
+                )
+                return
+
+            match_index = normalize_non_negative_int(data.get("match_index"))
+            if match_index is None:
+                match_index = 0
+
+            discovery = find_site_images_for_theme_internal(theme=theme, limit=max(match_index + 1, DEFAULT_SITE_IMAGE_LIMIT))
+            if not discovery["ok"]:
+                self._send_json(discovery["payload"], discovery["status"])
+                return
+
+            matches = discovery["payload"].get("matches", [])
+            if not matches:
+                self._send_json(
+                    {"status": "no_match", "theme": theme, "message": "no verified site image found for theme", "matches": []},
+                    200,
+                )
+                return
+
+            if match_index >= len(matches):
+                self._send_json({"status": "error", "message": "match_index is out of range"}, 400)
+                return
+
+            selected_match = matches[match_index]
+            download_result = download_site_image_bytes(selected_match.get("image_url", ""))
+            if not download_result["ok"]:
+                self._send_json(download_result["payload"], download_result["status"])
+                return
+
+            encoded_image = base64.b64encode(download_result["payload"]["image_bytes"]).decode("ascii")
+            filename = download_result["payload"]["filename"]
+            upload_result = upload_ad_image_via_direct(
+                target=target,
+                name=filename,
+                image_data_base64=encoded_image,
+            )
+            if not upload_result["ok"]:
+                self._send_json(upload_result["payload"], upload_result["status"])
+                return
+
+            state = deep_copy_json(RUNTIME_STATE)
+            add_yandex_uploaded_image_to_state(state, upload_result["payload"]["ad_image_hash"])
+            if not isinstance(state.get("media_library"), list):
+                state["media_library"] = []
+            state["media_library"].append(
+                {
+                    "type": "image",
+                    "source": "artfarfor_site",
+                    "theme": theme,
+                    "page_url": selected_match["page_url"],
+                    "image_url": selected_match["image_url"],
+                }
+            )
+
+            linked = link_image_hash_to_draft_state(
+                state=state,
+                scope=scope,
+                ad_index=ad_index,
+                ad_group_index=ad_group_index,
+                ad_image_hash=upload_result["payload"]["ad_image_hash"],
+            )
+            if not linked["ok"]:
+                self._send_json(linked["payload"], linked["status"])
+                return
+
+            state = linked["payload"]["state"]
+            state["draft_meta"]["last_action"] = "apply_site_image_to_draft_ad"
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "theme": theme,
+                    "selected_match": selected_match,
+                    "ad_image_hash": upload_result["payload"]["ad_image_hash"],
+                    "draft_fragment": linked["payload"]["draft_fragment"],
+                },
+                200,
+            )
+            return
+
         if self.path == "/draft_campaign_from_theme":
             theme = data.get("theme")
             if not isinstance(theme, str) or not theme.strip():
@@ -2296,6 +3445,13 @@ class Handler(BaseHTTPRequestHandler):
                 approved_patterns = build_default_approved_patterns()
             state["session_mode"] = "review_draft"
             state["approved_patterns"] = deep_copy_json(approved_patterns)
+            if isinstance(current_state.get("media_library"), list):
+                state["media_library"] = deep_copy_json(current_state["media_library"])
+            state["draft_media"] = []
+            state["last_uploaded_image_hash"] = current_state.get("last_uploaded_image_hash")
+            state["creative_spec"] = deep_copy_json(current_state.get("creative_spec"))
+            state["render_task"] = deep_copy_json(current_state.get("render_task"))
+            state["render_result_url"] = current_state.get("render_result_url")
             state["draft_campaign"] = apply_approved_patterns_to_draft(
                 theme.strip(),
                 build_draft_campaign_from_theme(theme.strip()),
@@ -2315,6 +3471,447 @@ class Handler(BaseHTTPRequestHandler):
                     "status": "success",
                     "session_mode": state["session_mode"],
                     "draft_campaign": state["draft_campaign"],
+                },
+                200,
+            )
+            return
+
+        if self.path == "/link_image_to_draft_ad":
+            scope = data.get("scope")
+            if scope not in {"campaign", "ad_group"}:
+                self._send_json({"status": "error", "message": "scope must be 'campaign' or 'ad_group'"}, 400)
+                return
+
+            ad_index = normalize_non_negative_int(data.get("ad_index"))
+            if ad_index is None:
+                self._send_json({"status": "error", "message": "ad_index must be a non-negative integer or numeric string"}, 400)
+                return
+
+            ad_group_index = None
+            if scope == "ad_group":
+                ad_group_index = normalize_non_negative_int(data.get("ad_group_index"))
+                if ad_group_index is None:
+                    self._send_json({"status": "error", "message": "ad_group_index must be a non-negative integer or numeric string for scope=ad_group"}, 400)
+                    return
+
+            ad_image_hash = normalize_non_empty_string(data.get("ad_image_hash"))
+            if ad_image_hash is None:
+                self._send_json({"status": "error", "message": "ad_image_hash must be a non-empty string"}, 400)
+                return
+
+            state = deep_copy_json(RUNTIME_STATE)
+            linked = link_image_hash_to_draft_state(
+                state=state,
+                scope=scope,
+                ad_index=ad_index,
+                ad_group_index=ad_group_index,
+                ad_image_hash=ad_image_hash,
+            )
+            if not linked["ok"]:
+                self._send_json(linked["payload"], linked["status"])
+                return
+
+            state = linked["payload"]["state"]
+            state["draft_meta"]["last_action"] = "link_image_to_draft_ad"
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "draft_fragment": linked["payload"]["draft_fragment"],
+                    "draft_media": linked["payload"]["draft_media"],
+                    "draft_campaign": linked["payload"]["draft_campaign"],
+                },
+                200,
+            )
+            return
+
+        if self.path == "/update_draft_ad":
+            scope = data.get("scope")
+            if scope not in {"campaign", "ad_group"}:
+                self._send_json({"status": "error", "message": "scope must be 'campaign' or 'ad_group'"}, 400)
+                return
+
+            ad_index = normalize_non_negative_int(data.get("ad_index"))
+            if ad_index is None:
+                self._send_json({"status": "error", "message": "ad_index must be a non-negative integer or numeric string"}, 400)
+                return
+
+            ad_group_index = None
+            if scope == "ad_group":
+                ad_group_index = normalize_non_negative_int(data.get("ad_group_index"))
+                if ad_group_index is None:
+                    self._send_json({"status": "error", "message": "ad_group_index must be a non-negative integer or numeric string for scope=ad_group"}, 400)
+                    return
+
+            has_any_field = any(field in data for field in ("title", "text", "final_url"))
+            if not has_any_field:
+                self._send_json({"status": "error", "message": "at least one of title, text, final_url must be provided"}, 400)
+                return
+
+            updates = {}
+
+            if "title" in data:
+                title = normalize_non_empty_string(data.get("title"))
+                if title is None:
+                    self._send_json({"status": "error", "message": "title must be a non-empty string when provided"}, 400)
+                    return
+                updates["title"] = title
+
+            if "text" in data:
+                text = normalize_non_empty_string(data.get("text"))
+                if text is None:
+                    self._send_json({"status": "error", "message": "text must be a non-empty string when provided"}, 400)
+                    return
+                updates["text"] = text
+
+            if "final_url" in data:
+                final_url = normalize_draft_final_url(data.get("final_url"))
+                if final_url is None:
+                    self._send_json({"status": "error", "message": "final_url must be a non-empty https://artfarfor.com URL when provided"}, 400)
+                    return
+                updates["final_url"] = final_url
+
+            state = deep_copy_json(RUNTIME_STATE)
+            draft_campaign = state.get("draft_campaign")
+            if not isinstance(draft_campaign, dict):
+                self._send_json({"status": "error", "message": "draft_campaign is not initialized"}, 409)
+                return
+
+            draft_ad, _ = resolve_draft_ad_reference(
+                draft_campaign=draft_campaign,
+                scope=scope,
+                ad_index=ad_index,
+                ad_group_index=ad_group_index,
+            )
+            if draft_ad is None:
+                self._send_json({"status": "error", "message": "draft ad not found for provided scope/indexes"}, 400)
+                return
+
+            if "title" in updates:
+                draft_ad["title"] = updates["title"]
+            if "text" in updates:
+                draft_ad["text"] = updates["text"]
+            if "final_url" in updates:
+                draft_ad["final_url"] = updates["final_url"]
+
+            state["draft_campaign"] = draft_campaign
+            state["draft_meta"]["last_action"] = "update_draft_ad"
+            state["draft_meta"]["revision_count"] = int(state["draft_meta"].get("revision_count", 0)) + 1
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "draft_fragment": draft_ad,
+                    "draft_campaign": state["draft_campaign"],
+                },
+                200,
+            )
+            return
+
+        if self.path == "/get_draft_ad":
+            scope = data.get("scope")
+            if scope not in {"campaign", "ad_group"}:
+                self._send_json({"status": "error", "message": "scope must be 'campaign' or 'ad_group'"}, 400)
+                return
+
+            ad_index = normalize_non_negative_int(data.get("ad_index"))
+            if ad_index is None:
+                self._send_json({"status": "error", "message": "ad_index must be a non-negative integer or numeric string"}, 400)
+                return
+
+            ad_group_index = None
+            if scope == "ad_group":
+                ad_group_index = normalize_non_negative_int(data.get("ad_group_index"))
+                if ad_group_index is None:
+                    self._send_json({"status": "error", "message": "ad_group_index must be a non-negative integer or numeric string for scope=ad_group"}, 400)
+                    return
+
+            state = deep_copy_json(RUNTIME_STATE)
+            draft_campaign = state.get("draft_campaign")
+            if not isinstance(draft_campaign, dict):
+                self._send_json({"status": "error", "message": "draft_campaign is not initialized"}, 409)
+                return
+
+            draft_ad, _ = resolve_draft_ad_reference(
+                draft_campaign=draft_campaign,
+                scope=scope,
+                ad_index=ad_index,
+                ad_group_index=ad_group_index,
+            )
+            if draft_ad is None:
+                self._send_json({"status": "error", "message": "draft ad not found for provided scope/indexes"}, 400)
+                return
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "draft_fragment": draft_ad,
+                },
+                200,
+            )
+            return
+
+        if self.path == "/update_draft_ad_group":
+            ad_group_index = normalize_non_negative_int(data.get("ad_group_index"))
+            if ad_group_index is None:
+                self._send_json({"status": "error", "message": "ad_group_index must be a non-negative integer or numeric string"}, 400)
+                return
+
+            group_name = normalize_non_empty_string(data.get("group_name"))
+            if group_name is None:
+                self._send_json({"status": "error", "message": "group_name must be a non-empty string"}, 400)
+                return
+
+            state = deep_copy_json(RUNTIME_STATE)
+            draft_campaign = state.get("draft_campaign")
+            if not isinstance(draft_campaign, dict):
+                self._send_json({"status": "error", "message": "draft_campaign is not initialized"}, 409)
+                return
+
+            ad_group = resolve_draft_ad_group_reference(draft_campaign, ad_group_index)
+            if ad_group is None:
+                self._send_json({"status": "error", "message": "draft ad_group not found for provided ad_group_index"}, 400)
+                return
+
+            ad_group["group_name"] = group_name
+            state["draft_campaign"] = draft_campaign
+            state["draft_meta"]["last_action"] = "update_draft_ad_group"
+            state["draft_meta"]["revision_count"] = int(state["draft_meta"].get("revision_count", 0)) + 1
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "ad_group_fragment": ad_group,
+                    "draft_campaign": state["draft_campaign"],
+                },
+                200,
+            )
+            return
+
+        if self.path == "/get_draft_ad_group":
+            ad_group_index = normalize_non_negative_int(data.get("ad_group_index"))
+            if ad_group_index is None:
+                self._send_json({"status": "error", "message": "ad_group_index must be a non-negative integer or numeric string"}, 400)
+                return
+
+            state = deep_copy_json(RUNTIME_STATE)
+            draft_campaign = state.get("draft_campaign")
+            if not isinstance(draft_campaign, dict):
+                self._send_json({"status": "error", "message": "draft_campaign is not initialized"}, 409)
+                return
+
+            ad_group = resolve_draft_ad_group_reference(draft_campaign, ad_group_index)
+            if ad_group is None:
+                self._send_json({"status": "error", "message": "draft ad_group not found for provided ad_group_index"}, 400)
+                return
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "ad_group_fragment": ad_group,
+                },
+                200,
+            )
+            return
+
+        if self.path == "/get_draft_campaign":
+            state = deep_copy_json(RUNTIME_STATE)
+            draft_campaign = state.get("draft_campaign")
+            if not isinstance(draft_campaign, dict):
+                self._send_json({"status": "error", "message": "draft_campaign is not initialized"}, 409)
+                return
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "session_mode": state.get("session_mode"),
+                    "draft_campaign": draft_campaign,
+                },
+                200,
+            )
+            return
+
+        if self.path == "/unlink_image_from_draft_ad":
+            scope = data.get("scope")
+            if scope not in {"campaign", "ad_group"}:
+                self._send_json({"status": "error", "message": "scope must be 'campaign' or 'ad_group'"}, 400)
+                return
+
+            ad_index = normalize_non_negative_int(data.get("ad_index"))
+            if ad_index is None:
+                self._send_json({"status": "error", "message": "ad_index must be a non-negative integer or numeric string"}, 400)
+                return
+
+            ad_group_index = None
+            if scope == "ad_group":
+                ad_group_index = normalize_non_negative_int(data.get("ad_group_index"))
+                if ad_group_index is None:
+                    self._send_json({"status": "error", "message": "ad_group_index must be a non-negative integer or numeric string for scope=ad_group"}, 400)
+                    return
+
+            state = deep_copy_json(RUNTIME_STATE)
+            draft_campaign = state.get("draft_campaign")
+            if not isinstance(draft_campaign, dict):
+                self._send_json({"status": "error", "message": "draft_campaign is not initialized"}, 409)
+                return
+
+            draft_ad, link_ref = resolve_draft_ad_reference(
+                draft_campaign=draft_campaign,
+                scope=scope,
+                ad_index=ad_index,
+                ad_group_index=ad_group_index,
+            )
+            if draft_ad is None or link_ref is None:
+                self._send_json({"status": "error", "message": "draft ad not found for provided scope/indexes"}, 400)
+                return
+
+            draft_ad["ad_image_hash"] = None
+            draft_ad["creative_spec"] = None
+
+            raw_draft_media = state.get("draft_media")
+            filtered_draft_media = []
+            if isinstance(raw_draft_media, list):
+                for item in raw_draft_media:
+                    if not isinstance(item, dict):
+                        filtered_draft_media.append(item)
+                        continue
+                    if item.get("scope") != link_ref["scope"]:
+                        filtered_draft_media.append(item)
+                        continue
+                    if item.get("ad_index") != link_ref["ad_index"]:
+                        filtered_draft_media.append(item)
+                        continue
+                    if link_ref["scope"] == "ad_group":
+                        if item.get("ad_group_index") != link_ref.get("ad_group_index"):
+                            filtered_draft_media.append(item)
+                        continue
+                    if item.get("ad_group_index") is not None:
+                        filtered_draft_media.append(item)
+                        continue
+
+            state["draft_media"] = filtered_draft_media
+            state["draft_campaign"] = draft_campaign
+            state["draft_meta"]["last_action"] = "unlink_image_from_draft_ad"
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "draft_fragment": draft_ad,
+                    "draft_media": state["draft_media"],
+                    "draft_campaign": state["draft_campaign"],
+                },
+                200,
+            )
+            return
+
+        if self.path == "/clear_creative_spec":
+            state = deep_copy_json(RUNTIME_STATE)
+            state["creative_spec"] = None
+            state["draft_meta"]["last_action"] = "clear_creative_spec"
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "creative_spec": None,
+                },
+                200,
+            )
+            return
+
+        if self.path == "/save_render_task":
+            render_task = data.get("render_task")
+            if not isinstance(render_task, dict) or not render_task:
+                self._send_json({"status": "error", "message": "render_task must be a non-empty object"}, 400)
+                return
+
+            state = deep_copy_json(RUNTIME_STATE)
+            state["render_task"] = deep_copy_json(render_task)
+            state["draft_meta"]["last_action"] = "save_render_task"
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "render_task": state["render_task"],
+                },
+                200,
+            )
+            return
+
+        if self.path == "/get_render_task":
+            state = deep_copy_json(RUNTIME_STATE)
+            self._send_json(
+                {
+                    "status": "success",
+                    "render_task": deep_copy_json(state.get("render_task")),
+                },
+                200,
+            )
+            return
+
+        if self.path == "/save_render_result_url":
+            render_result_url = normalize_non_empty_string(data.get("render_result_url"))
+            if render_result_url is None:
+                self._send_json({"status": "error", "message": "render_result_url must be a non-empty string"}, 400)
+                return
+
+            state = deep_copy_json(RUNTIME_STATE)
+            state["render_result_url"] = render_result_url
+            state["draft_meta"]["last_action"] = "save_render_result_url"
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "render_result_url": state["render_result_url"],
+                },
+                200,
+            )
+            return
+
+        if self.path == "/get_render_result_url":
+            state = deep_copy_json(RUNTIME_STATE)
+            self._send_json(
+                {
+                    "status": "success",
+                    "render_result_url": state.get("render_result_url"),
+                },
+                200,
+            )
+            return
+
+        if self.path == "/clear_render_state":
+            state = deep_copy_json(RUNTIME_STATE)
+            state["render_task"] = None
+            state["render_result_url"] = None
+            state["draft_meta"]["last_action"] = "clear_render_state"
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "render_task": None,
+                    "render_result_url": None,
+                },
+                200,
+            )
+            return
+
+        if self.path == "/clear_draft_media":
+            state = deep_copy_json(RUNTIME_STATE)
+            state["draft_media"] = []
+            state["draft_meta"]["last_action"] = "clear_draft_media"
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "draft_media": [],
                 },
                 200,
             )
@@ -3091,11 +4688,27 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(payload, parsed["status"])
                 return
 
+            state = deep_copy_json(RUNTIME_STATE)
+            if not isinstance(state.get("media_library"), list):
+                state["media_library"] = []
+            state["last_uploaded_image_hash"] = parsed["payload"]["ad_image_hash"]
+            state["media_library"].append(
+                {
+                    "type": "image",
+                    "source": "yandex_direct_upload",
+                    "ad_image_hash": parsed["payload"]["ad_image_hash"],
+                }
+            )
+            state["draft_meta"]["last_action"] = "upload_ad_image"
+            save_runtime_state(state)
+
             self._send_json(
                 {
                     "status": "success",
                     "target": target,
                     "ad_image_hash": parsed["payload"]["ad_image_hash"],
+                    "last_uploaded_image_hash": state["last_uploaded_image_hash"],
+                    "media_library": state["media_library"],
                     "warnings": parsed["payload"]["warnings"],
                 },
                 200,
@@ -3570,6 +5183,82 @@ class Handler(BaseHTTPRequestHandler):
                     "status": "success",
                     "target": target,
                     "ad_ids": [str(ad_id) for ad_id in normalized_ad_ids],
+                    "results": parsed["payload"]["results"],
+                    "raw": result,
+                },
+                200,
+            )
+            return
+
+        if self.path == "/delete_ad_groups":
+            target = resolve_target(data)
+            if target not in ALLOWED_TARGETS:
+                self._send_json({"status": "error", "message": "target must be 'sandbox' or 'production'"}, 400)
+                return
+
+            raw_ad_group_ids = data.get("ad_group_ids")
+            if not isinstance(raw_ad_group_ids, list) or not raw_ad_group_ids:
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": "ad_group_ids must be a non-empty array of positive integers or numeric strings",
+                    },
+                    400,
+                )
+                return
+
+            normalized_ad_group_ids = []
+            for item in raw_ad_group_ids:
+                normalized = normalize_ad_group_id(item)
+                if normalized is None:
+                    self._send_json(
+                        {"status": "error", "message": "each ad_group_id must be a positive integer or numeric string"},
+                        400,
+                    )
+                    return
+                normalized_ad_group_ids.append(normalized)
+
+            confirm = resolve_confirm(data)
+            if target == "production" and not confirm:
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": "production ad groups delete requires explicit confirm=true",
+                        "target": "production",
+                    },
+                    400,
+                )
+                return
+
+            client = YandexDirectClient.for_target(target)
+
+            try:
+                result = client.delete_ad_groups(normalized_ad_group_ids)
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": str(e),
+                        "target": target,
+                        "ad_group_ids": [str(ad_group_id) for ad_group_id in normalized_ad_group_ids],
+                    },
+                    502,
+                )
+                return
+
+            parsed = parse_action_results(result, "DeleteResults", "ad_groups", "delete")
+            if not parsed["ok"]:
+                payload = parsed["payload"]
+                payload["target"] = target
+                payload["ad_group_ids"] = [str(ad_group_id) for ad_group_id in normalized_ad_group_ids]
+                self._send_json(payload, parsed["status"])
+                return
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "target": target,
+                    "ad_group_ids": [str(ad_group_id) for ad_group_id in normalized_ad_group_ids],
                     "results": parsed["payload"]["results"],
                     "raw": result,
                 },

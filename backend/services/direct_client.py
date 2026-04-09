@@ -873,6 +873,18 @@ class YandexDirectClient:
         )
         return response.body
 
+    def delete_ad_groups(self, ad_group_ids: List[int]) -> Dict[str, Any]:
+        response = self.call_v501(
+            service="adgroups",
+            method="delete",
+            params={
+                "SelectionCriteria": {
+                    "Ids": ad_group_ids,
+                },
+            },
+        )
+        return response.body
+
     def add_unified_campaign(
         self,
         name: str,

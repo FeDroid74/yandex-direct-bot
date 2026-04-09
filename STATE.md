@@ -15,7 +15,7 @@
   "session_mode": "review_draft",
   "draft_campaign": {
     "campaign_type": "UNIFIED_CAMPAIGN",
-    "campaign_name": "фарфоровые подарки | Approved",
+    "campaign_name": "Royal Doulton | Approved",
     "site_url": "https://artfarfor.com",
     "region": "RU",
     "language": "RU",
@@ -44,7 +44,7 @@
     ],
     "ad_groups": [
       {
-        "group_name": "фарфоровые подарки",
+        "group_name": "Статуэтки Royal Doulton в подарок",
         "negative_keywords": [],
         "autotargeting_settings": {
           "Categories": {
@@ -62,18 +62,22 @@
         },
         "ads": [
           {
-            "title": "фарфоровые подарки | ArtFarfor",
-            "text": "Авторские фарфоровые статуэтки и подарки ручной работы",
-            "final_url": "https://artfarfor.com"
+            "title": "Royal Doulton | ArtFarfor",
+            "text": "Статуэтки Royal Doulton — красивый подарок и коллекционный английский фарфор.",
+            "final_url": "https://artfarfor.com",
+            "ad_image_hash": null,
+            "creative_spec": null
           }
         ]
       }
     ],
     "ads": [
       {
-        "title": "фарфоровые подарки | ArtFarfor",
-        "text": "Подарочные фарфоровые статуэтки ручной работы",
-        "final_url": "https://artfarfor.com"
+        "title": "Royal Doulton | ArtFarfor",
+        "text": "Royal Doulton — коллекционная статуэтка в подарок. Английский фарфор с характером.",
+        "final_url": "https://artfarfor.com",
+        "ad_image_hash": "A3xEP1DlR40pUpIg9F5mYg",
+        "creative_spec": null
       }
     ],
     "autotargeting_settings": {
@@ -114,11 +118,71 @@
     "campaign_name_suffix": " | Approved",
     "budget_defaults": null
   },
+  "media_library": [
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "8I8g30Soojev2uJ5yhAv4A"
+    },
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "MAXDUmRpCDp93BtHPPJJuQ"
+    },
+    {
+      "type": "image",
+      "source": "artfarfor_site",
+      "theme": "Royal Doulton",
+      "page_url": "https://artfarfor.com/collection/katalog-1-3cecf7",
+      "image_url": "https://static.insales-cdn.com/images/collections/1/5447/93631815/211218-01-O.jpg"
+    },
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "MAXDUmRpCDp93BtHPPJJuQ"
+    },
+    {
+      "type": "image",
+      "source": "artfarfor_site",
+      "theme": "Royal Doulton",
+      "page_url": "https://artfarfor.com/collection/katalog-1-3cecf7",
+      "image_url": "https://static.insales-cdn.com/images/collections/1/5447/93631815/211218-01-O.jpg"
+    },
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "A3xEP1DlR40pUpIg9F5mYg"
+    }
+  ],
+  "draft_media": [
+    {
+      "type": "image",
+      "scope": "campaign",
+      "ad_image_hash": "MAXDUmRpCDp93BtHPPJJuQ",
+      "ad_index": 0
+    },
+    {
+      "type": "image",
+      "scope": "campaign",
+      "ad_image_hash": "probe",
+      "ad_index": 0
+    },
+    {
+      "type": "image",
+      "scope": "campaign",
+      "ad_image_hash": "A3xEP1DlR40pUpIg9F5mYg",
+      "ad_index": 0
+    }
+  ],
+  "last_uploaded_image_hash": "A3xEP1DlR40pUpIg9F5mYg",
+  "creative_spec": null,
+  "render_task": null,
+  "render_result_url": null,
   "draft_meta": {
     "version": "v1",
-    "last_action": "draft_campaign_from_theme",
-    "theme": "фарфоровые подарки",
-    "revision_count": 0,
+    "last_action": "update_draft_ad",
+    "theme": "Royal Doulton",
+    "revision_count": 11,
     "supported_revision_rules": [
       "измени название кампании на X",
       "добавь группу X",
