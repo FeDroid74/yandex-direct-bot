@@ -28,6 +28,8 @@ There is an existing separate project (Kwork):
 - prefers concise answers
 - values structure and clarity
 - prefers practical solutions over abstract ideas
+- in Telegram wants only short final results without debug JSON
+- wants confirmation in normal human language, not via technical flags like `confirm=true`
 
 ## Working Style
 

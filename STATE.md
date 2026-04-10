@@ -66,7 +66,8 @@
             "text": "Статуэтки Royal Doulton — красивый подарок и коллекционный английский фарфор.",
             "final_url": "https://artfarfor.com",
             "ad_image_hash": null,
-            "creative_spec": null
+            "creative_spec": null,
+            "ad_image_hashes": []
           }
         ]
       }
@@ -74,10 +75,15 @@
     "ads": [
       {
         "title": "Royal Doulton | ArtFarfor",
-        "text": "Royal Doulton — коллекционная статуэтка в подарок. Английский фарфор с характером.",
+        "text": "Royal Doulton — коллекционная статуэтка и подарок из английского фарфора.",
         "final_url": "https://artfarfor.com",
         "ad_image_hash": "A3xEP1DlR40pUpIg9F5mYg",
-        "creative_spec": null
+        "creative_spec": null,
+        "ad_image_hashes": [
+          "A3xEP1DlR40pUpIg9F5mYg",
+          "8I8g30Soojev2uJ5yhAv4A",
+          "MAXDUmRpCDp93BtHPPJJuQ"
+        ]
       }
     ],
     "autotargeting_settings": {
@@ -152,6 +158,50 @@
       "type": "image",
       "source": "yandex_direct_upload",
       "ad_image_hash": "A3xEP1DlR40pUpIg9F5mYg"
+    },
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "MBt-Q6Kx_sKkHgGh5G1kBg"
+    },
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "q1qj_BfZW0VhLEE1U4S8LQ"
+    },
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "hoTCpDPWufvTuIaKEdG-3A"
+    },
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "ccxxhnVHdFITZDeVQWwZDw"
+    },
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "MAXDUmRpCDp93BtHPPJJuQ"
+    },
+    {
+      "type": "image",
+      "source": "artfarfor_site",
+      "theme": "Royal Doulton",
+      "page_url": "https://artfarfor.com/collection/katalog-1-3cecf7",
+      "image_url": "https://static.insales-cdn.com/images/collections/1/5447/93631815/211218-01-O.jpg"
+    },
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "A3xEP1DlR40pUpIg9F5mYg"
+    },
+    {
+      "type": "image",
+      "source": "artfarfor_site",
+      "theme": "Royal Doulton",
+      "page_url": "https://artfarfor.com/product/statuetka-farfor-tkach-snov-royal-doulton-angliya",
+      "image_url": "https://static.insales-cdn.com/images/products/1/2497/2694662593/250126-03-O.jpg"
     }
   ],
   "draft_media": [
@@ -172,6 +222,12 @@
       "scope": "campaign",
       "ad_image_hash": "A3xEP1DlR40pUpIg9F5mYg",
       "ad_index": 0
+    },
+    {
+      "type": "image",
+      "scope": "campaign",
+      "ad_image_hash": "8I8g30Soojev2uJ5yhAv4A",
+      "ad_index": 0
     }
   ],
   "last_uploaded_image_hash": "A3xEP1DlR40pUpIg9F5mYg",
@@ -180,9 +236,9 @@
   "render_result_url": null,
   "draft_meta": {
     "version": "v1",
-    "last_action": "update_draft_ad",
+    "last_action": "apply_site_image_to_draft_ad",
     "theme": "Royal Doulton",
-    "revision_count": 11,
+    "revision_count": 12,
     "supported_revision_rules": [
       "измени название кампании на X",
       "добавь группу X",

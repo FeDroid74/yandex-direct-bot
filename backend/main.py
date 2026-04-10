@@ -11,7 +11,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from typing import Optional
+from typing import List, Optional
 
 from config import settings
 from services.direct_client import YandexDirectClient, YandexDirectClientError
@@ -454,6 +454,7 @@ def build_ad_group_draft(name: str) -> dict:
                 "text": "Авторские фарфоровые статуэтки и подарки ручной работы",
                 "final_url": "https://artfarfor.com",
                 "ad_image_hash": None,
+                "ad_image_hashes": [],
                 "creative_spec": None,
             }
         ],
@@ -497,6 +498,7 @@ def build_draft_campaign_from_theme(theme: str) -> dict:
                 "text": "Подарочные фарфоровые статуэтки ручной работы",
                 "final_url": "https://artfarfor.com",
                 "ad_image_hash": None,
+                "ad_image_hashes": [],
                 "creative_spec": None,
             }
         ],
@@ -534,12 +536,11 @@ def apply_approved_patterns_to_draft(theme: str, draft_campaign: dict, approved_
             href = sitelink.get("href")
             if isinstance(href, str) and href.startswith("https://artfarfor.com"):
                 allowed_sitelinks.append(deep_copy_json(sitelink))
-            else:
-                skipped_sitelinks = True
+                continue
+            skipped_sitelinks = True
 
         if allowed_sitelinks:
             draft["sitelinks"] = allowed_sitelinks
-
         if skipped_sitelinks:
             assumptions.append("Assumption: skipped sitelinks_defaults entries outside https://artfarfor.com.")
 
@@ -698,6 +699,7 @@ RUNTIME_STATE = load_runtime_state()
 
 def save_runtime_state(state: dict) -> None:
     global RUNTIME_STATE
+    normalize_draft_campaign_images(state.get("draft_campaign"))
     RUNTIME_STATE = deep_copy_json(state)
     with open(STATE_FILE_PATH, "w", encoding="utf-8") as state_file:
         state_file.write(render_state_markdown(RUNTIME_STATE))
@@ -1363,27 +1365,70 @@ def add_yandex_uploaded_image_to_state(state: dict, ad_image_hash: str) -> dict:
     return state
 
 
-def link_image_hash_to_draft_state(state: dict, scope: str, ad_index: int, ad_group_index: Optional[int], ad_image_hash: str) -> dict:
-    draft_campaign = state.get("draft_campaign")
-    if not isinstance(draft_campaign, dict):
-        return {"ok": False, "status": 409, "payload": {"status": "error", "message": "draft_campaign is not initialized"}}
+def normalize_ad_image_hashes(raw_hashes, fallback_hash=None) -> List[str]:
+    normalized_hashes: List[str] = []
+    seen_hashes = set()
 
-    draft_ad, link_ref = resolve_draft_ad_reference(
-        draft_campaign=draft_campaign,
-        scope=scope,
-        ad_index=ad_index,
-        ad_group_index=ad_group_index,
+    if isinstance(raw_hashes, list):
+        for item in raw_hashes:
+            normalized = normalize_non_empty_string(item)
+            if normalized is None or normalized in seen_hashes:
+                continue
+            normalized_hashes.append(normalized)
+            seen_hashes.add(normalized)
+
+    fallback = normalize_non_empty_string(fallback_hash)
+    if fallback is not None and fallback not in seen_hashes:
+        normalized_hashes.insert(0, fallback)
+
+    return normalized_hashes
+
+
+def normalize_draft_ad_images(draft_ad: dict) -> dict:
+    if not isinstance(draft_ad, dict):
+        return draft_ad
+
+    normalized_hashes = normalize_ad_image_hashes(
+        draft_ad.get("ad_image_hashes"),
+        fallback_hash=draft_ad.get("ad_image_hash"),
     )
-    if draft_ad is None or link_ref is None:
-        return {"ok": False, "status": 400, "payload": {"status": "error", "message": "draft ad not found for provided scope/indexes"}}
+    draft_ad["ad_image_hashes"] = normalized_hashes
+    draft_ad["ad_image_hash"] = normalized_hashes[0] if normalized_hashes else None
+    return draft_ad
 
-    draft_ad["ad_image_hash"] = ad_image_hash
-    creative_spec = state.get("creative_spec")
-    if isinstance(creative_spec, dict):
-        draft_ad["creative_spec"] = deep_copy_json(creative_spec)
 
+def normalize_draft_campaign_images(draft_campaign) -> None:
+    if not isinstance(draft_campaign, dict):
+        return
+
+    raw_campaign_ads = draft_campaign.get("ads")
+    if isinstance(raw_campaign_ads, list):
+        for draft_ad in raw_campaign_ads:
+            normalize_draft_ad_images(draft_ad)
+
+    raw_ad_groups = draft_campaign.get("ad_groups")
+    if not isinstance(raw_ad_groups, list):
+        return
+
+    for ad_group in raw_ad_groups:
+        if not isinstance(ad_group, dict):
+            continue
+        raw_group_ads = ad_group.get("ads")
+        if not isinstance(raw_group_ads, list):
+            continue
+        for draft_ad in raw_group_ads:
+            normalize_draft_ad_images(draft_ad)
+
+
+def append_draft_media_item(
+    state: dict,
+    link_ref: dict,
+    ad_image_hash: str,
+    creative_spec: Optional[dict] = None,
+) -> None:
     if not isinstance(state.get("draft_media"), list):
         state["draft_media"] = []
+
     draft_media_item = {
         "type": "image",
         "scope": link_ref["scope"],
@@ -1416,6 +1461,49 @@ def link_image_hash_to_draft_state(state: dict, scope: str, ad_index: int, ad_gr
     elif "creative_spec" in draft_media_item:
         matched_item["creative_spec"] = deep_copy_json(draft_media_item["creative_spec"])
 
+
+def link_image_hashes_to_draft_state(
+    state: dict,
+    scope: str,
+    ad_index: int,
+    ad_group_index: Optional[int],
+    ad_image_hashes: List[str],
+) -> dict:
+    normalized_hashes = normalize_ad_image_hashes(ad_image_hashes)
+    if not normalized_hashes:
+        return {"ok": False, "status": 400, "payload": {"status": "error", "message": "ad_image_hashes must contain at least one non-empty string"}}
+
+    draft_campaign = state.get("draft_campaign")
+    if not isinstance(draft_campaign, dict):
+        return {"ok": False, "status": 409, "payload": {"status": "error", "message": "draft_campaign is not initialized"}}
+
+    normalize_draft_campaign_images(draft_campaign)
+
+    draft_ad, link_ref = resolve_draft_ad_reference(
+        draft_campaign=draft_campaign,
+        scope=scope,
+        ad_index=ad_index,
+        ad_group_index=ad_group_index,
+    )
+    if draft_ad is None or link_ref is None:
+        return {"ok": False, "status": 400, "payload": {"status": "error", "message": "draft ad not found for provided scope/indexes"}}
+
+    normalize_draft_ad_images(draft_ad)
+    existing_hashes = list(draft_ad.get("ad_image_hashes") or [])
+    for ad_image_hash in normalized_hashes:
+        if ad_image_hash not in existing_hashes:
+            existing_hashes.append(ad_image_hash)
+
+    draft_ad["ad_image_hashes"] = existing_hashes
+    draft_ad["ad_image_hash"] = existing_hashes[0] if existing_hashes else None
+
+    creative_spec = state.get("creative_spec")
+    if isinstance(creative_spec, dict):
+        draft_ad["creative_spec"] = deep_copy_json(creative_spec)
+
+    for ad_image_hash in normalized_hashes:
+        append_draft_media_item(state, link_ref, ad_image_hash, creative_spec if isinstance(creative_spec, dict) else None)
+
     state["draft_campaign"] = draft_campaign
     return {
         "ok": True,
@@ -1427,6 +1515,19 @@ def link_image_hash_to_draft_state(state: dict, scope: str, ad_index: int, ad_gr
             "draft_media": state["draft_media"],
         },
     }
+
+
+def link_image_hash_to_draft_state(state: dict, scope: str, ad_index: int, ad_group_index: Optional[int], ad_image_hash: str) -> dict:
+    return link_image_hashes_to_draft_state(
+        state=state,
+        scope=scope,
+        ad_index=ad_index,
+        ad_group_index=ad_group_index,
+        ad_image_hashes=[ad_image_hash],
+    )
+
+
+normalize_draft_campaign_images(RUNTIME_STATE.get("draft_campaign"))
 
 
 def normalize_draft_final_url(value) -> Optional[str]:
@@ -3357,7 +3458,18 @@ class Handler(BaseHTTPRequestHandler):
             if match_index is None:
                 match_index = 0
 
-            discovery = find_site_images_for_theme_internal(theme=theme, limit=max(match_index + 1, DEFAULT_SITE_IMAGE_LIMIT))
+            requested_limit = normalize_non_negative_int(data.get("limit"))
+            if "limit" in data:
+                if requested_limit is None or requested_limit < 1:
+                    self._send_json({"status": "error", "message": "limit must be a positive integer or numeric string when provided"}, 400)
+                    return
+            else:
+                requested_limit = 1
+
+            discovery = find_site_images_for_theme_internal(
+                theme=theme,
+                limit=max(match_index + requested_limit, DEFAULT_SITE_IMAGE_LIMIT),
+            )
             if not discovery["ok"]:
                 self._send_json(discovery["payload"], discovery["status"])
                 return
@@ -3374,43 +3486,48 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"status": "error", "message": "match_index is out of range"}, 400)
                 return
 
-            selected_match = matches[match_index]
-            download_result = download_site_image_bytes(selected_match.get("image_url", ""))
-            if not download_result["ok"]:
-                self._send_json(download_result["payload"], download_result["status"])
-                return
+            selected_matches = matches[match_index : match_index + requested_limit]
+            uploaded_hashes = []
+            for selected_match in selected_matches:
+                download_result = download_site_image_bytes(selected_match.get("image_url", ""))
+                if not download_result["ok"]:
+                    self._send_json(download_result["payload"], download_result["status"])
+                    return
 
-            encoded_image = base64.b64encode(download_result["payload"]["image_bytes"]).decode("ascii")
-            filename = download_result["payload"]["filename"]
-            upload_result = upload_ad_image_via_direct(
-                target=target,
-                name=filename,
-                image_data_base64=encoded_image,
-            )
-            if not upload_result["ok"]:
-                self._send_json(upload_result["payload"], upload_result["status"])
-                return
+                encoded_image = base64.b64encode(download_result["payload"]["image_bytes"]).decode("ascii")
+                filename = download_result["payload"]["filename"]
+                upload_result = upload_ad_image_via_direct(
+                    target=target,
+                    name=filename,
+                    image_data_base64=encoded_image,
+                )
+                if not upload_result["ok"]:
+                    self._send_json(upload_result["payload"], upload_result["status"])
+                    return
+                uploaded_hashes.append(upload_result["payload"]["ad_image_hash"])
 
             state = deep_copy_json(RUNTIME_STATE)
-            add_yandex_uploaded_image_to_state(state, upload_result["payload"]["ad_image_hash"])
             if not isinstance(state.get("media_library"), list):
                 state["media_library"] = []
-            state["media_library"].append(
-                {
-                    "type": "image",
-                    "source": "artfarfor_site",
-                    "theme": theme,
-                    "page_url": selected_match["page_url"],
-                    "image_url": selected_match["image_url"],
-                }
-            )
 
-            linked = link_image_hash_to_draft_state(
+            for selected_match, uploaded_hash in zip(selected_matches, uploaded_hashes):
+                add_yandex_uploaded_image_to_state(state, uploaded_hash)
+                state["media_library"].append(
+                    {
+                        "type": "image",
+                        "source": "artfarfor_site",
+                        "theme": theme,
+                        "page_url": selected_match["page_url"],
+                        "image_url": selected_match["image_url"],
+                    }
+                )
+
+            linked = link_image_hashes_to_draft_state(
                 state=state,
                 scope=scope,
                 ad_index=ad_index,
                 ad_group_index=ad_group_index,
-                ad_image_hash=upload_result["payload"]["ad_image_hash"],
+                ad_image_hashes=uploaded_hashes,
             )
             if not linked["ok"]:
                 self._send_json(linked["payload"], linked["status"])
@@ -3424,8 +3541,10 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "status": "success",
                     "theme": theme,
-                    "selected_match": selected_match,
-                    "ad_image_hash": upload_result["payload"]["ad_image_hash"],
+                    "selected_match": selected_matches[0],
+                    "selected_matches": selected_matches,
+                    "ad_image_hash": uploaded_hashes[0],
+                    "ad_image_hashes": uploaded_hashes,
                     "draft_fragment": linked["payload"]["draft_fragment"],
                 },
                 200,
@@ -3526,6 +3645,61 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if self.path == "/link_multiple_images_to_draft_ad":
+            scope = data.get("scope")
+            if scope not in {"campaign", "ad_group"}:
+                self._send_json({"status": "error", "message": "scope must be 'campaign' or 'ad_group'"}, 400)
+                return
+
+            ad_index = normalize_non_negative_int(data.get("ad_index"))
+            if ad_index is None:
+                self._send_json({"status": "error", "message": "ad_index must be a non-negative integer or numeric string"}, 400)
+                return
+
+            ad_group_index = None
+            if scope == "ad_group":
+                ad_group_index = normalize_non_negative_int(data.get("ad_group_index"))
+                if ad_group_index is None:
+                    self._send_json({"status": "error", "message": "ad_group_index must be a non-negative integer or numeric string for scope=ad_group"}, 400)
+                    return
+
+            raw_ad_image_hashes = data.get("ad_image_hashes")
+            if not isinstance(raw_ad_image_hashes, list) or not raw_ad_image_hashes:
+                self._send_json({"status": "error", "message": "ad_image_hashes must be a non-empty array of strings"}, 400)
+                return
+
+            normalized_hashes = normalize_ad_image_hashes(raw_ad_image_hashes)
+            if not normalized_hashes:
+                self._send_json({"status": "error", "message": "ad_image_hashes must contain at least one non-empty string"}, 400)
+                return
+
+            state = deep_copy_json(RUNTIME_STATE)
+            linked = link_image_hashes_to_draft_state(
+                state=state,
+                scope=scope,
+                ad_index=ad_index,
+                ad_group_index=ad_group_index,
+                ad_image_hashes=normalized_hashes,
+            )
+            if not linked["ok"]:
+                self._send_json(linked["payload"], linked["status"])
+                return
+
+            state = linked["payload"]["state"]
+            state["draft_meta"]["last_action"] = "link_multiple_images_to_draft_ad"
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "draft_fragment": linked["payload"]["draft_fragment"],
+                    "draft_media": linked["payload"]["draft_media"],
+                    "draft_campaign": linked["payload"]["draft_campaign"],
+                },
+                200,
+            )
+            return
+
         if self.path == "/update_draft_ad":
             scope = data.get("scope")
             if scope not in {"campaign", "ad_group"}:
@@ -3578,6 +3752,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"status": "error", "message": "draft_campaign is not initialized"}, 409)
                 return
 
+            normalize_draft_campaign_images(draft_campaign)
             draft_ad, _ = resolve_draft_ad_reference(
                 draft_campaign=draft_campaign,
                 scope=scope,
@@ -3634,6 +3809,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"status": "error", "message": "draft_campaign is not initialized"}, 409)
                 return
 
+            normalize_draft_campaign_images(draft_campaign)
             draft_ad, _ = resolve_draft_ad_reference(
                 draft_campaign=draft_campaign,
                 scope=scope,
@@ -3670,6 +3846,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"status": "error", "message": "draft_campaign is not initialized"}, 409)
                 return
 
+            normalize_draft_campaign_images(draft_campaign)
             ad_group = resolve_draft_ad_group_reference(draft_campaign, ad_group_index)
             if ad_group is None:
                 self._send_json({"status": "error", "message": "draft ad_group not found for provided ad_group_index"}, 400)
@@ -3703,6 +3880,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"status": "error", "message": "draft_campaign is not initialized"}, 409)
                 return
 
+            normalize_draft_campaign_images(draft_campaign)
             ad_group = resolve_draft_ad_group_reference(draft_campaign, ad_group_index)
             if ad_group is None:
                 self._send_json({"status": "error", "message": "draft ad_group not found for provided ad_group_index"}, 400)
@@ -3724,6 +3902,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"status": "error", "message": "draft_campaign is not initialized"}, 409)
                 return
 
+            normalize_draft_campaign_images(draft_campaign)
             self._send_json(
                 {
                     "status": "success",
@@ -3768,7 +3947,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"status": "error", "message": "draft ad not found for provided scope/indexes"}, 400)
                 return
 
+            normalize_draft_ad_images(draft_ad)
             draft_ad["ad_image_hash"] = None
+            draft_ad["ad_image_hashes"] = []
             draft_ad["creative_spec"] = None
 
             raw_draft_media = state.get("draft_media")
