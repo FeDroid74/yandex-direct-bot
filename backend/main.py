@@ -25,13 +25,23 @@ ALLOWED_AUTOTARGETING_CATEGORY_KEYS = {"Exact", "Narrow", "Alternative", "Access
 ALLOWED_AUTOTARGETING_BRAND_OPTION_KEYS = {"WithoutBrands", "WithAdvertiserBrand", "WithCompetitorsBrand"}
 DEFAULT_METRICA_COUNTER_ID = 99041859
 DEFAULT_GOAL_ID = 352606262
+DEFAULT_PRODUCTION_REGION_IDS = [225]
 STATE_FILE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "STATE.md"))
 ARTFARFOR_BASE_URL = "https://artfarfor.com/"
 ARTFARFOR_DOMAIN = "artfarfor.com"
 ARTFARFOR_IMAGE_ALLOWED_DOMAINS = {ARTFARFOR_DOMAIN, "static.insales-cdn.com"}
+DEFAULT_COMPETITOR_ANALYSIS_URLS = [
+    "https://farforts.ru/",
+    "https://starivina.ru/",
+    "https://kunstgalerie.ru/",
+]
+ALLOWED_COMPETITOR_DOMAINS = {"farforts.ru", "starivina.ru", "kunstgalerie.ru"}
 DEFAULT_SITE_IMAGE_LIMIT = 3
 MAX_SITE_DISCOVERY_PAGES = 18
 MAX_SITE_LINKS_PER_PAGE = 20
+MAX_COMPETITOR_ANALYSIS_PAGES = 16
+MAX_COMPETITOR_ANALYSIS_DEPTH = 3
+MAX_COMPETITOR_LINKS_PER_PAGE = 14
 SITE_HTTP_TIMEOUT_SECONDS = 20
 SITE_THEME_STOPWORDS = {"и", "или", "для", "на", "в", "с", "к", "по", "из", "а", "the"}
 DECORATIVE_IMAGE_HINTS = (
@@ -49,6 +59,39 @@ DECORATIVE_IMAGE_HINTS = (
     "placeholder",
 )
 CRAWL_PATH_BANNED_HINTS = ("/contacts", "/delivery", "/oplata", "/cart", "/profile", "/login")
+COMPETITOR_CRAWL_BANNED_HINTS = CRAWL_PATH_BANNED_HINTS + (
+    "/contact",
+    "/payment",
+    "/policy",
+    "/privacy",
+    "/checkout",
+    "/wishlist",
+    "/register",
+)
+COMPETITOR_PATH_POSITIVE_HINTS = (
+    "/catalog",
+    "/category",
+    "/product",
+    "/component",
+    "/shop",
+    "/item",
+    "/figur",
+    "/statu",
+    "/farfor",
+    "/kloun",
+    "/pier",
+    "/arlek",
+)
+COMPETITOR_POSITIONING_HINTS = (
+    "фарфор",
+    "статуэт",
+    "фигур",
+    "антик",
+    "винтаж",
+    "подар",
+    "интерьер",
+    "коллекц",
+)
 SUPPORTED_SESSION_MODES = [
     "draft_campaign",
     "review_draft",
@@ -457,6 +500,128 @@ def build_ad_group_draft(name: str) -> dict:
                 "ad_image_hashes": [],
                 "creative_spec": None,
             }
+        ],
+    }
+
+
+def build_draft_ad_fragment(title_seed: str, text: str) -> dict:
+    normalized_title_seed = title_seed.strip()
+    normalized_text = text.strip()
+    return {
+        "title": f"{normalized_title_seed} | ArtFarfor",
+        "text": normalized_text,
+        "final_url": "https://artfarfor.com",
+        "ad_image_hash": None,
+        "ad_image_hashes": [],
+        "creative_spec": None,
+    }
+
+
+def build_rebuild_group_name(theme: str, group_index: int) -> str:
+    normalized_theme = theme.strip()
+    group_suffixes = [
+        "",
+        " в подарок",
+        " для интерьера",
+        " для коллекции",
+        " ручной работы",
+        " для дома",
+        " для декора",
+        " для ценителей",
+    ]
+    if group_index < len(group_suffixes):
+        return f"{normalized_theme}{group_suffixes[group_index]}".strip()
+    return f"{normalized_theme} {group_index + 1}"
+
+
+def build_rebuild_ad_text(theme: str, group_name: str, ad_index: int) -> str:
+    normalized_theme = theme.strip()
+    normalized_group_name = group_name.strip()
+    text_variants = [
+        f"{normalized_group_name} из фарфора для интерьера, коллекции и подарка.",
+        f"{normalized_group_name} ручной работы для дома, витрины и коллекции.",
+        f"{normalized_theme} для подарка и декора с доставкой по России.",
+        f"{normalized_theme} для ценителей авторского и коллекционного фарфора.",
+        f"{normalized_group_name} для подарка, интерьера и домашней коллекции.",
+        f"{normalized_theme} для дома и подарка тем, кто любит фарфоровый декор.",
+    ]
+    return text_variants[ad_index % len(text_variants)]
+
+
+def build_rebuild_ad_group_draft(theme: str, group_index: int, ads_per_group: int) -> dict:
+    group_name = build_rebuild_group_name(theme, group_index)
+    ads = []
+    for ad_index in range(ads_per_group):
+        ads.append(
+            build_draft_ad_fragment(
+                group_name,
+                build_rebuild_ad_text(theme, group_name, ad_index),
+            )
+        )
+
+    return {
+        "group_name": group_name,
+        "negative_keywords": [],
+        "autotargeting_settings": build_default_draft_autotargeting_settings(),
+        "ads": ads,
+    }
+
+
+def build_rebuild_campaign_ads(theme: str, ads_count: int) -> list[dict]:
+    normalized_theme = theme.strip()
+    ads = []
+    for ad_index in range(ads_count):
+        title_seed = build_rebuild_group_name(normalized_theme, ad_index)
+        ads.append(
+            build_draft_ad_fragment(
+                title_seed,
+                build_rebuild_ad_text(normalized_theme, title_seed, ad_index),
+            )
+        )
+    return ads
+
+
+def build_rebuild_draft_campaign(theme: str, ad_groups_count: int = 4, ads_per_group: int = 4) -> dict:
+    normalized_theme = theme.strip()
+    ad_groups = []
+    for group_index in range(ad_groups_count):
+        ad_groups.append(build_rebuild_ad_group_draft(normalized_theme, group_index, ads_per_group))
+
+    return {
+        "campaign_type": "UNIFIED_CAMPAIGN",
+        "campaign_name": f"{normalized_theme} | ArtFarfor",
+        "site_url": "https://artfarfor.com",
+        "region": "RU",
+        "language": "RU",
+        "placement_type": "both",
+        "goal_type": "leads",
+        "strategy_type": "pay_for_conversion",
+        "metrica_goal_id": DEFAULT_GOAL_ID,
+        "metrica_counter_id": DEFAULT_METRICA_COUNTER_ID,
+        "weekly_budget_rub": 10000,
+        "target_cpa_rub": 500,
+        "tracking_params": DEFAULT_DRAFT_TRACKING_PARAMS,
+        "utm_tracking": True,
+        "negative_keywords": ["бесплатно", "дешево"],
+        "sitelinks": [
+            {
+                "title": "Каталог",
+                "href": "https://artfarfor.com",
+            },
+            {
+                "title": "Коллекции",
+                "href": "https://artfarfor.com",
+            },
+        ],
+        "ad_groups": ad_groups,
+        "ads": build_rebuild_campaign_ads(normalized_theme, ads_per_group),
+        "autotargeting_settings": build_default_draft_autotargeting_settings(),
+        "assumptions": [
+            "Assumption: used fixed site_url https://artfarfor.com per project restriction.",
+            "Assumption: region='RU' and goal_type='leads' are draft defaults for backend validate/create flow and require review.",
+            "Assumption: used RU, both placements, pay_for_conversion, metrica_goal_id 352606262 per confirmed project constraints.",
+            "Assumption: weekly_budget_rub=10000 and target_cpa_rub=500 are draft defaults and require review.",
+            "Assumption: sitelinks and negative keywords are prototype placeholders for review_draft.",
         ],
     }
 
@@ -1000,6 +1165,404 @@ def parse_artfarfor_page(url: str, html_text: str) -> dict:
     }
 
 
+def normalize_competitor_text(value) -> str:
+    if not isinstance(value, str):
+        return ""
+    return clean_inline_text(value).lower().replace("ё", "е")
+
+
+def extract_url_host(url: str) -> str:
+    if not isinstance(url, str) or not url.strip():
+        return ""
+    parsed = urllib.parse.urlsplit(url)
+    return (parsed.netloc or "").split("@")[-1].split(":")[0].lower()
+
+
+def is_allowed_competitor_domain_url(url: str) -> bool:
+    host = extract_url_host(url)
+    if not host:
+        return False
+    return host in ALLOWED_COMPETITOR_DOMAINS or any(host.endswith(f".{domain}") for domain in ALLOWED_COMPETITOR_DOMAINS)
+
+
+def normalize_competitor_base_url(url: str) -> Optional[str]:
+    if not isinstance(url, str) or not url.strip():
+        return None
+    parsed = urllib.parse.urlsplit(url.strip())
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    if not is_allowed_competitor_domain_url(url.strip()):
+        return None
+    host = extract_url_host(url.strip())
+    return urllib.parse.urlunsplit((parsed.scheme, host, "/", "", ""))
+
+
+def normalize_competitor_page_url(url: str, base_url: str) -> Optional[str]:
+    if not isinstance(url, str) or not url.strip():
+        return None
+    resolved = urllib.parse.urljoin(base_url, url.strip())
+    parsed = urllib.parse.urlsplit(resolved)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    if not is_allowed_competitor_domain_url(resolved):
+        return None
+    normalized_path = parsed.path or "/"
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc.lower(), normalized_path, "", ""))
+
+
+def is_same_competitor_host(url: str, base_url: str) -> bool:
+    return extract_url_host(url) == extract_url_host(base_url)
+
+
+def is_competitor_crawl_candidate_url(url: str, base_url: str) -> bool:
+    normalized = normalize_competitor_page_url(url, base_url)
+    if normalized is None or not is_same_competitor_host(normalized, base_url):
+        return False
+    path = urllib.parse.urlsplit(normalized).path.lower()
+    if any(hint in path for hint in COMPETITOR_CRAWL_BANNED_HINTS):
+        return False
+    if re.search(r"\.(?:jpg|jpeg|png|gif|svg|css|js|xml|pdf|ico|webp)$", path):
+        return False
+    return True
+
+
+def transliterate_competitor_token(token: str) -> str:
+    translit_map = {
+        "а": "a",
+        "б": "b",
+        "в": "v",
+        "г": "g",
+        "д": "d",
+        "е": "e",
+        "ё": "e",
+        "ж": "zh",
+        "з": "z",
+        "и": "i",
+        "й": "y",
+        "к": "k",
+        "л": "l",
+        "м": "m",
+        "н": "n",
+        "о": "o",
+        "п": "p",
+        "р": "r",
+        "с": "s",
+        "т": "t",
+        "у": "u",
+        "ф": "f",
+        "х": "h",
+        "ц": "ts",
+        "ч": "ch",
+        "ш": "sh",
+        "щ": "sch",
+        "ъ": "",
+        "ы": "y",
+        "ь": "",
+        "э": "e",
+        "ю": "yu",
+        "я": "ya",
+    }
+    return "".join(translit_map.get(char, char) for char in normalize_competitor_text(token))
+
+
+def build_competitor_theme_profile(theme: str) -> dict:
+    raw_tokens = [
+        token
+        for token in re.findall(r"[0-9a-zа-яё]+", normalize_competitor_text(theme))
+        if len(token) > 2 and token not in {"для", "под", "the", "and"}
+    ]
+    match_terms: list[str] = []
+    seen_terms = set()
+
+    for token in raw_tokens:
+        candidates = [token]
+        transliterated = transliterate_competitor_token(token)
+        if transliterated and transliterated != token:
+            candidates.append(transliterated)
+        if len(token) > 4 and token[-1] in {"ы", "и", "а", "я", "у", "ю", "е"}:
+            truncated = token[:-1]
+            if len(truncated) >= 4:
+                candidates.append(truncated)
+                transliterated_truncated = transliterate_competitor_token(truncated)
+                if transliterated_truncated and transliterated_truncated != truncated:
+                    candidates.append(transliterated_truncated)
+
+        for candidate in candidates:
+            normalized_candidate = normalize_competitor_text(candidate)
+            if len(normalized_candidate) < 4 or normalized_candidate in seen_terms:
+                continue
+            seen_terms.add(normalized_candidate)
+            match_terms.append(normalized_candidate)
+
+    return {
+        "theme": clean_inline_text(theme),
+        "tokens": raw_tokens,
+        "match_terms": match_terms,
+    }
+
+
+def find_competitor_matched_terms(source_text: str, terms: list[str]) -> list[str]:
+    normalized_source = normalize_competitor_text(source_text)
+    matched_terms: list[str] = []
+    for term in terms:
+        normalized_term = normalize_competitor_text(term)
+        if normalized_term and normalized_term in normalized_source and normalized_term not in matched_terms:
+            matched_terms.append(normalized_term)
+    return matched_terms
+
+
+def add_competitor_evidence_line(evidence: list[str], source_name: str, matched_term: str) -> None:
+    line = f"{source_name} contains {matched_term}"
+    if line not in evidence:
+        evidence.append(line)
+
+
+def collect_competitor_page_evidence(page: dict, theme_profile: dict) -> list[str]:
+    evidence: list[str] = []
+    sources = [
+        ("title", page.get("title", "")),
+        ("heading", " ".join(page.get("headings", []))),
+        ("page text", page.get("text", "")),
+        ("url", page.get("url", "")),
+    ]
+
+    for source_name, source_value in sources:
+        matched_terms = find_competitor_matched_terms(source_value, theme_profile["match_terms"])
+        for matched_term in matched_terms[:2]:
+            add_competitor_evidence_line(evidence, source_name, matched_term)
+        if len(evidence) >= 4:
+            break
+
+    return evidence[:4]
+
+
+def score_competitor_link(link_item: dict, theme_profile: dict, base_url: str) -> int:
+    normalized_url = normalize_competitor_page_url(link_item.get("url", ""), base_url)
+    if normalized_url is None or not is_competitor_crawl_candidate_url(normalized_url, base_url):
+        return -1
+
+    path = urllib.parse.urlsplit(normalized_url).path.lower()
+    combined_text = normalize_competitor_text(f"{link_item.get('text', '')} {normalized_url}")
+    score = 0
+
+    if any(term in combined_text for term in theme_profile["match_terms"]):
+        score += 12
+    if any(hint in path for hint in COMPETITOR_PATH_POSITIVE_HINTS):
+        score += 3
+    if any(hint in combined_text for hint in COMPETITOR_POSITIONING_HINTS):
+        score += 1
+    if path in {"", "/"}:
+        score -= 2
+
+    return score
+
+
+def extract_competitor_price(text: str) -> Optional[str]:
+    if not isinstance(text, str):
+        return None
+    match = re.search(r"\b\d[\d\s.,]{0,18}\s*₽|\b\d[\d\s.,]{0,18}\s*руб\.?", text, flags=re.IGNORECASE)
+    if match is None:
+        return None
+    return clean_inline_text(match.group(0))
+
+
+def extract_competitor_positioning_facts(page: dict) -> list[dict]:
+    facts: list[dict] = []
+    seen_texts = set()
+    title = clean_inline_text(page.get("title"))
+    if title:
+        facts.append({"type": "homepage_title", "source_url": page["url"], "text": title})
+        seen_texts.add(normalize_competitor_text(title))
+
+    for heading in page.get("headings", [])[:3]:
+        normalized_heading = normalize_competitor_text(heading)
+        if not normalized_heading:
+            continue
+        if any(hint in normalized_heading for hint in COMPETITOR_POSITIONING_HINTS):
+            if normalized_heading in seen_texts:
+                continue
+            facts.append({"type": "homepage_heading", "source_url": page["url"], "text": clean_inline_text(heading)})
+            seen_texts.add(normalized_heading)
+
+    raw_sentences = re.split(r"(?<=[.!?])\s+", clean_inline_text(page.get("text", "")))
+    for sentence in raw_sentences[:12]:
+        normalized_sentence = normalize_competitor_text(sentence)
+        if len(normalized_sentence) < 20 or len(normalized_sentence) > 180:
+            continue
+        if normalized_sentence in seen_texts:
+            continue
+        if any(hint in normalized_sentence for hint in COMPETITOR_POSITIONING_HINTS):
+            facts.append({"type": "homepage_text", "source_url": page["url"], "text": clean_inline_text(sentence)})
+            seen_texts.add(normalized_sentence)
+        if len(facts) >= 3:
+            break
+
+    return facts[:3]
+
+
+def build_competitor_match_from_page(page: dict, theme_profile: dict) -> Optional[dict]:
+    evidence = collect_competitor_page_evidence(page, theme_profile)
+    if not evidence:
+        return None
+
+    title = clean_inline_text(page.get("title") or " ".join(page.get("headings", [])) or page.get("url", ""))
+    if not title:
+        return None
+
+    return {
+        "page_url": page["url"],
+        "title": title,
+        "headings": [clean_inline_text(item) for item in page.get("headings", []) if clean_inline_text(item)][:2],
+        "price": extract_competitor_price(page.get("text", "")),
+        "evidence": evidence,
+    }
+
+
+def build_competitor_confirmed_facts(positioning_facts: list[dict], matched_pages: list[dict]) -> list[dict]:
+    facts = list(positioning_facts)
+    for matched_page in matched_pages:
+        facts.append(
+            {
+                "type": "theme_match",
+                "source_url": matched_page["page_url"],
+                "title": matched_page["title"],
+                "price": matched_page.get("price"),
+                "evidence": matched_page.get("evidence", []),
+            }
+        )
+    return facts
+
+
+def analyze_competitor_site(theme: str, competitor_url: str) -> dict:
+    base_url = normalize_competitor_base_url(competitor_url)
+    if base_url is None:
+        return {
+            "competitor_url": clean_inline_text(competitor_url),
+            "status": "error",
+            "message": "competitor URL must belong to the allowed competitor list",
+            "confirmed_facts": [],
+            "matched_pages": [],
+            "warnings": [],
+        }
+
+    homepage_result = fetch_site_url(base_url)
+    if not homepage_result["ok"]:
+        return {
+            "competitor_url": base_url,
+            "status": "fetch_error",
+            "message": "failed to fetch competitor homepage",
+            "confirmed_facts": [],
+            "matched_pages": [],
+            "warnings": [homepage_result["payload"]],
+        }
+
+    theme_profile = build_competitor_theme_profile(theme)
+    homepage_page = parse_artfarfor_page(base_url, homepage_result["text"])
+    queue = [(base_url, 0)]
+    queued_urls = {base_url}
+    visited_urls = set()
+    matched_pages: list[dict] = []
+    seen_match_urls = set()
+    warnings: list[dict] = []
+
+    while queue and len(visited_urls) < MAX_COMPETITOR_ANALYSIS_PAGES:
+        current_url, depth = queue.pop(0)
+        queued_urls.discard(current_url)
+        if current_url in visited_urls:
+            continue
+
+        page_result = homepage_result if current_url == base_url else fetch_site_url(current_url)
+        visited_urls.add(current_url)
+        if not page_result["ok"]:
+            warnings.append(
+                {
+                    "source_url": current_url,
+                    "message": "failed to fetch competitor page",
+                    "raw": page_result["payload"],
+                }
+            )
+            continue
+
+        page = parse_artfarfor_page(current_url, page_result["text"])
+        maybe_match = build_competitor_match_from_page(page, theme_profile)
+        if maybe_match is not None and maybe_match["page_url"] not in seen_match_urls:
+            matched_pages.append(maybe_match)
+            seen_match_urls.add(maybe_match["page_url"])
+
+        if depth >= MAX_COMPETITOR_ANALYSIS_DEPTH:
+            continue
+
+        ranked_links = []
+        for link_item in page.get("links", []):
+            normalized_url = normalize_competitor_page_url(link_item.get("url", ""), current_url)
+            if normalized_url is None or normalized_url in visited_urls or normalized_url in queued_urls:
+                continue
+            if not is_competitor_crawl_candidate_url(normalized_url, base_url):
+                continue
+            score = score_competitor_link({"url": normalized_url, "text": link_item.get("text", "")}, theme_profile, base_url)
+            if score < 0:
+                continue
+            ranked_links.append((score, normalized_url))
+
+        ranked_links.sort(key=lambda item: item[0], reverse=True)
+        for score, next_url in ranked_links[:MAX_COMPETITOR_LINKS_PER_PAGE]:
+            if score <= 0 and depth > 0:
+                continue
+            queue.append((next_url, depth + 1))
+            queued_urls.add(next_url)
+
+    positioning_facts = extract_competitor_positioning_facts(homepage_page)
+    return {
+        "competitor_url": base_url,
+        "status": "success",
+        "theme_status": "matched" if matched_pages else "no_match",
+        "homepage_title": homepage_page.get("title"),
+        "confirmed_facts": build_competitor_confirmed_facts(positioning_facts, matched_pages[:5]),
+        "matched_pages": matched_pages[:5],
+        "warnings": warnings[:6],
+    }
+
+
+def build_competitor_analysis_preview_payload(theme: str, competitors: list[str]) -> dict:
+    normalized_theme = normalize_non_empty_string(theme)
+    if normalized_theme is None:
+        return {"ok": False, "status": 400, "payload": {"status": "error", "message": "theme must be a non-empty string"}}
+
+    normalized_competitors: list[str] = []
+    seen_competitors = set()
+    for competitor_url in competitors:
+        normalized_url = normalize_competitor_base_url(competitor_url)
+        if normalized_url is None:
+            return {
+                "ok": False,
+                "status": 400,
+                "payload": {
+                    "status": "error",
+                    "message": "each competitor must be one of the allowed public competitor sites",
+                },
+            }
+        if normalized_url in seen_competitors:
+            continue
+        seen_competitors.add(normalized_url)
+        normalized_competitors.append(normalized_url)
+
+    competitors_payload = [analyze_competitor_site(normalized_theme, competitor_url) for competitor_url in normalized_competitors]
+    return {
+        "ok": True,
+        "status": 200,
+        "payload": {
+            "status": "success",
+            "theme": normalized_theme,
+            "summary": {
+                "competitors_requested": len(normalized_competitors),
+                "competitors_reached": sum(1 for item in competitors_payload if item.get("status") == "success"),
+                "theme_matched_competitors": sum(1 for item in competitors_payload if item.get("theme_status") == "matched"),
+            },
+            "competitors": competitors_payload,
+        },
+    }
+
+
 def build_theme_profile(theme: str) -> dict:
     normalized = normalize_match_text(theme)
     tokens = tokenize_match_text(theme)
@@ -1420,6 +1983,47 @@ def normalize_draft_campaign_images(draft_campaign) -> None:
             normalize_draft_ad_images(draft_ad)
 
 
+def enumerate_draft_ad_references(draft_campaign: dict) -> list[dict]:
+    references: list[dict] = []
+    if not isinstance(draft_campaign, dict):
+        return references
+
+    raw_campaign_ads = draft_campaign.get("ads")
+    if isinstance(raw_campaign_ads, list):
+        for ad_index, draft_ad in enumerate(raw_campaign_ads):
+            if not isinstance(draft_ad, dict):
+                continue
+            references.append(
+                {
+                    "scope": "campaign",
+                    "ad_index": ad_index,
+                }
+            )
+
+    raw_ad_groups = draft_campaign.get("ad_groups")
+    if not isinstance(raw_ad_groups, list):
+        return references
+
+    for ad_group_index, ad_group in enumerate(raw_ad_groups):
+        if not isinstance(ad_group, dict):
+            continue
+        raw_group_ads = ad_group.get("ads")
+        if not isinstance(raw_group_ads, list):
+            continue
+        for ad_index, draft_ad in enumerate(raw_group_ads):
+            if not isinstance(draft_ad, dict):
+                continue
+            references.append(
+                {
+                    "scope": "ad_group",
+                    "ad_group_index": ad_group_index,
+                    "ad_index": ad_index,
+                }
+            )
+
+    return references
+
+
 def append_draft_media_item(
     state: dict,
     link_ref: dict,
@@ -1807,6 +2411,945 @@ def parse_action_results(result: dict, result_key: str, entity_name: str, action
             "status": "success",
             "results": items,
         },
+    }
+
+
+def collect_action_error_codes(results: list) -> list[int]:
+    codes: list[int] = []
+    seen_codes = set()
+    if not isinstance(results, list):
+        return codes
+
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        raw_errors = item.get("errors")
+        if not isinstance(raw_errors, list):
+            continue
+        for raw_error in raw_errors:
+            if not isinstance(raw_error, dict):
+                continue
+            code = raw_error.get("Code")
+            if not isinstance(code, int) or code in seen_codes:
+                continue
+            seen_codes.add(code)
+            codes.append(code)
+
+    return codes
+
+
+def collect_campaign_entities_for_replace(client: YandexDirectClient, campaign_id: int) -> dict:
+    campaign_result = client.get_campaign_details(campaign_id)
+    campaigns = campaign_result.get("result", {}).get("Campaigns", [])
+    if not campaigns:
+        return {
+            "ok": False,
+            "status": 404,
+            "payload": {
+                "status": "error",
+                "message": "campaign not found",
+                "target": "production",
+                "campaign_id": str(campaign_id),
+                "raw": campaign_result,
+            },
+        }
+
+    ad_groups_result = client.list_ad_groups(campaign_id)
+    raw_ad_groups = ad_groups_result.get("result", {}).get("AdGroups", [])
+    ad_group_ids: list[int] = []
+    ad_ids: list[int] = []
+    warnings: list[str] = []
+    region_ids_for_create = None
+
+    for raw_ad_group in raw_ad_groups:
+        if not isinstance(raw_ad_group, dict):
+            continue
+
+        ad_group_id = normalize_ad_group_id(raw_ad_group.get("Id"))
+        if ad_group_id is None:
+            continue
+
+        ad_group_ids.append(ad_group_id)
+
+        if region_ids_for_create is None:
+            normalized_region_ids = normalize_region_ids(raw_ad_group.get("RegionIds"))
+            if normalized_region_ids:
+                region_ids_for_create = normalized_region_ids
+
+        try:
+            ads_result = client.list_ads(ad_group_id)
+        except YandexDirectClientError as e:
+            warnings.append(f"Could not list ads for existing ad_group {ad_group_id}: {str(e)}")
+            continue
+
+        raw_ads = ads_result.get("result", {}).get("Ads", [])
+        for raw_ad in raw_ads:
+            if not isinstance(raw_ad, dict):
+                continue
+            ad_id = normalize_ad_id(raw_ad.get("Id"))
+            if ad_id is not None:
+                ad_ids.append(ad_id)
+
+    if region_ids_for_create is None:
+        region_ids_for_create = list(DEFAULT_PRODUCTION_REGION_IDS)
+        warnings.append(
+            "Assumption: used default region_ids [225] because current campaign had no reusable ad group region_ids."
+        )
+
+    return {
+        "ok": True,
+        "status": 200,
+        "payload": {
+            "campaign": campaigns[0],
+            "ad_group_ids": ad_group_ids,
+            "ad_ids": ad_ids,
+            "region_ids": region_ids_for_create,
+            "warnings": warnings,
+        },
+    }
+
+
+def build_cleanup_action_payload(status: str, **extra) -> dict:
+    payload = {"status": status}
+    payload.update(extra)
+    return payload
+
+
+def build_theme_tracking_token(theme: str) -> str:
+    if not isinstance(theme, str):
+        return "artfarfor"
+    raw_tokens = re.findall(r"\w+", theme.lower(), flags=re.UNICODE)
+    normalized_tokens = [token for token in raw_tokens if token]
+    if not normalized_tokens:
+        return "artfarfor"
+    return urllib.parse.quote("-".join(normalized_tokens[:4]), safe="")
+
+
+def infer_campaign_theme(campaign: dict, ad_groups: list) -> Optional[str]:
+    campaign_name = normalize_non_empty_string(campaign.get("Name")) if isinstance(campaign, dict) else None
+    if campaign_name:
+        theme_candidate = campaign_name.split("|", 1)[0].strip()
+        if theme_candidate:
+            return theme_candidate
+
+    if isinstance(ad_groups, list):
+        for ad_group in ad_groups:
+            if not isinstance(ad_group, dict):
+                continue
+            ad_group_name = normalize_non_empty_string(ad_group.get("Name") or ad_group.get("name"))
+            if ad_group_name:
+                return ad_group_name
+
+    return None
+
+
+def build_campaign_enrichment_tracking_params(theme: str) -> str:
+    return f"{DEFAULT_DRAFT_TRACKING_PARAMS}&utm_theme={build_theme_tracking_token(theme)}"
+
+
+def build_campaign_enrichment_negative_keywords(theme: str) -> list[str]:
+    base_keywords = [
+        "оптом",
+        "бу",
+        "бесплатно",
+        "скачать",
+        "фото",
+        "картинки",
+        "обои",
+        "авито",
+        "ozon",
+        "wildberries",
+    ]
+
+    lowered_theme = (theme or "").lower()
+    if "клоун" in lowered_theme:
+        base_keywords.extend(
+            [
+                "аниматор",
+                "цирк",
+                "костюм",
+                "грим",
+                "раскраска",
+                "рисунок",
+            ]
+        )
+
+    deduplicated = []
+    seen = set()
+    for keyword in base_keywords:
+        normalized_keyword = normalize_non_empty_string(keyword)
+        if normalized_keyword is None or normalized_keyword in seen:
+            continue
+        seen.add(normalized_keyword)
+        deduplicated.append(normalized_keyword)
+    return deduplicated
+
+
+def normalize_callout_text_for_direct(text: str) -> Optional[str]:
+    normalized_text = clean_inline_text(text)
+    if not normalized_text:
+        return None
+    normalized_text = re.sub(r"\s+", " ", normalized_text).strip(" .,-")
+    if len(normalized_text) <= 25:
+        return normalized_text
+    truncated = normalized_text[:25].rstrip()
+    if " " in truncated:
+        truncated = truncated.rsplit(" ", 1)[0]
+    truncated = truncated.strip(" .,-")
+    return truncated or None
+
+
+def build_campaign_enrichment_callouts(theme: str) -> list[str]:
+    candidates = [
+        normalize_callout_text_for_direct(f"{theme} из фарфора"),
+        normalize_callout_text_for_direct("Для подарка"),
+        normalize_callout_text_for_direct("Для интерьера"),
+        normalize_callout_text_for_direct("Для коллекции"),
+        normalize_callout_text_for_direct(theme),
+    ]
+    callouts: list[str] = []
+    seen = set()
+    for candidate in candidates:
+        if candidate is None or candidate in seen:
+            continue
+        seen.add(candidate)
+        callouts.append(candidate)
+        if len(callouts) >= 4:
+            break
+    return callouts
+
+
+def normalize_sitelink_title_for_direct(title: str, fallback_theme: str) -> str:
+    normalized_title = clean_inline_text(title) or clean_inline_text(fallback_theme) or "ArtFarfor"
+    normalized_title = re.sub(r"\s+\|\s+.*$", "", normalized_title)
+    normalized_title = re.sub(r"\s+[–-]\s+купить.*$", "", normalized_title, flags=re.IGNORECASE)
+    normalized_title = re.sub(r"^Статуэтка\.\s*Фарфор\.\s*", "", normalized_title, flags=re.IGNORECASE)
+    normalized_title = re.sub(r"\s+\d[\d\s]*₽\s*$", "", normalized_title)
+    normalized_title = re.sub(r"\s+", " ", normalized_title).strip(" .,-")
+    if len(normalized_title) <= 30:
+        return normalized_title
+    for fragment in re.split(r"\.\s*", normalized_title):
+        fragment = fragment.strip(" .,-")
+        if 4 <= len(fragment) <= 30:
+            return fragment
+    truncated = normalized_title[:30].rstrip()
+    if " " in truncated:
+        truncated = truncated.rsplit(" ", 1)[0]
+    truncated = truncated.strip(" .,-")
+    if truncated:
+        return truncated
+    fallback_title = clean_inline_text(fallback_theme) or "ArtFarfor"
+    return (fallback_title[:30].strip(" .,-") or "ArtFarfor")
+
+
+def collect_safe_homepage_sitelinks(theme: str, limit: int = 4) -> tuple[list[dict], list[str]]:
+    warnings: list[str] = []
+    homepage_result = fetch_site_url(ARTFARFOR_BASE_URL)
+    if not homepage_result["ok"]:
+        warnings.append("Could not fetch artfarfor.com homepage for thematic sitelinks; used safe fallback links.")
+        return (
+            [
+                {"title": "Каталог", "href": "https://artfarfor.com"},
+                {"title": "Коллекции", "href": "https://artfarfor.com"},
+                {"title": "Подарки", "href": "https://artfarfor.com"},
+                {"title": clean_inline_text(theme) or "ArtFarfor", "href": "https://artfarfor.com"},
+            ][:limit],
+            warnings,
+        )
+
+    page = parse_artfarfor_page(ARTFARFOR_BASE_URL, homepage_result["text"])
+    theme_profile = build_theme_profile(theme)
+    themed_candidates = []
+    fallback_candidates = []
+    seen_urls = set()
+
+    for link_item in page.get("links", []):
+        normalized_url = normalize_artfarfor_url(link_item.get("url", ""), ARTFARFOR_BASE_URL)
+        if normalized_url is None or normalized_url in seen_urls:
+            continue
+        title = normalize_non_empty_string(link_item.get("text"))
+        if title is None:
+            continue
+        seen_urls.add(normalized_url)
+        candidate = {
+            "title": normalize_sitelink_title_for_direct(title, theme),
+            "href": normalized_url,
+        }
+        score = score_site_link({"url": normalized_url, "text": title}, theme_profile)
+        if score > 0:
+            themed_candidates.append((score, candidate))
+        elif normalized_url == ARTFARFOR_BASE_URL or "/collection/" in normalized_url:
+            fallback_candidates.append(candidate)
+
+    themed_candidates.sort(key=lambda item: item[0], reverse=True)
+    sitelinks = [candidate for _, candidate in themed_candidates[:limit]]
+
+    for candidate in fallback_candidates:
+        if len(sitelinks) >= limit:
+            break
+        if any(existing["href"] == candidate["href"] for existing in sitelinks):
+            continue
+        sitelinks.append(candidate)
+
+    fallback_defaults = [
+        {"title": "Каталог", "href": "https://artfarfor.com"},
+        {"title": "Коллекции", "href": "https://artfarfor.com"},
+        {"title": "Подарки", "href": "https://artfarfor.com"},
+        {"title": clean_inline_text(theme) or "ArtFarfor", "href": "https://artfarfor.com"},
+    ]
+    for fallback_item in fallback_defaults:
+        if len(sitelinks) >= limit:
+            break
+        if any(existing["href"] == fallback_item["href"] for existing in sitelinks):
+            continue
+        sitelinks.append(fallback_item)
+
+    if len(themed_candidates) < min(limit, 4):
+        warnings.append("Thematic sitelinks were only partially confirmed from the current site; safe artfarfor.com links were added as fallback.")
+
+    return sitelinks[:limit], warnings
+
+
+def build_campaign_enrichment_not_confirmed() -> list[str]:
+    return [
+        "Interests and habits targeting is not confirmed for the current backend flow: official Yandex Direct API docs confirm audience interests for MOBILE_APP_AD_GROUP and user-profile audience targets for CPM_BANNER USER_PROFILE or CPM_VIDEO, not the current UNIFIED campaign enrichment flow.",
+        "WordStat integration is not confirmed for the current backend flow: the official Wordstat API exists as a separate API at api.wordstat.yandex.net and requires separate API access setup, while the current backend has no confirmed client, routes, or environment configuration for it.",
+        "Competitor analysis automation is not confirmed by the current backend.",
+    ]
+
+
+def extract_group_negative_terms(group_name: str, theme: str) -> list[str]:
+    raw_tokens = re.findall(r"\w+", (group_name or "").lower(), flags=re.UNICODE)
+    theme_tokens = set(re.findall(r"\w+", (theme or "").lower(), flags=re.UNICODE))
+    stopwords = {
+        "для",
+        "в",
+        "из",
+        "и",
+        "на",
+        "с",
+        "по",
+        "artfarfor",
+        "артфарфор",
+        "upc",
+        "production",
+        "group",
+    }
+
+    normalized_terms: list[str] = []
+    seen_terms = set()
+    for token in raw_tokens:
+        if token in theme_tokens or token in stopwords or len(token) < 3:
+            continue
+        if token in seen_terms:
+            continue
+        seen_terms.add(token)
+        normalized_terms.append(token)
+    return normalized_terms
+
+
+def build_campaign_enrichment_group_negative_keywords(
+    ad_groups: list[dict],
+    theme: str,
+) -> list[dict]:
+    prepared_groups: list[dict] = []
+    all_terms: list[str] = []
+
+    for ad_group in ad_groups:
+        if not isinstance(ad_group, dict):
+            continue
+        group_name = normalize_non_empty_string(ad_group.get("Name") or ad_group.get("name"))
+        ad_group_id = normalize_positive_int_id(ad_group.get("Id") or ad_group.get("id"))
+        if group_name is None or ad_group_id is None:
+            continue
+        current_terms = extract_group_negative_terms(group_name, theme)
+        prepared_groups.append(
+            {
+                "ad_group_id": ad_group_id,
+                "group_name": group_name,
+                "current_terms": current_terms,
+            }
+        )
+        for term in current_terms:
+            if term not in all_terms:
+                all_terms.append(term)
+
+    result: list[dict] = []
+    for prepared_group in prepared_groups:
+        current_terms = prepared_group["current_terms"]
+        negative_keywords = [term for term in all_terms if term not in current_terms]
+        result.append(
+            {
+                "ad_group_id": str(prepared_group["ad_group_id"]),
+                "group_name": prepared_group["group_name"],
+                "negative_keywords": negative_keywords,
+            }
+        )
+
+    return result
+
+
+def extract_ad_extension_ids_from_raw_ad(raw_ad: dict) -> list[int]:
+    if not isinstance(raw_ad, dict):
+        return []
+    text_ad = raw_ad.get("TextAd")
+    if not isinstance(text_ad, dict):
+        return []
+    raw_extensions = text_ad.get("AdExtensions")
+    if not isinstance(raw_extensions, list):
+        return []
+
+    ad_extension_ids: list[int] = []
+    seen_ids = set()
+    for raw_extension in raw_extensions:
+        if not isinstance(raw_extension, dict):
+            continue
+        ad_extension_id = normalize_positive_int_id(raw_extension.get("AdExtensionId"))
+        if ad_extension_id is None or ad_extension_id in seen_ids:
+            continue
+        seen_ids.add(ad_extension_id)
+        ad_extension_ids.append(ad_extension_id)
+    return ad_extension_ids
+
+
+def collect_campaign_context_for_enrichment(client: YandexDirectClient, campaign_id: int) -> dict:
+    campaign_result = client.get_campaign_details(campaign_id)
+    campaigns = campaign_result.get("result", {}).get("Campaigns", [])
+    if not campaigns:
+        return {
+            "ok": False,
+            "status": 404,
+            "payload": {
+                "status": "error",
+                "message": "campaign not found",
+                "target": "production",
+                "campaign_id": str(campaign_id),
+                "raw": campaign_result,
+            },
+        }
+
+    ad_groups_result = client.list_ad_groups(campaign_id)
+    ad_groups = ad_groups_result.get("result", {}).get("AdGroups", [])
+    ad_ids: list[int] = []
+    ad_extension_ids_by_ad_id: dict[int, list[int]] = {}
+    warnings: list[str] = []
+
+    for raw_ad_group in ad_groups:
+        if not isinstance(raw_ad_group, dict):
+            continue
+        ad_group_id = normalize_ad_group_id(raw_ad_group.get("Id"))
+        if ad_group_id is None:
+            continue
+        try:
+            ads_result = client.list_ads(ad_group_id)
+        except YandexDirectClientError as e:
+            warnings.append(f"Could not list ads for ad_group {ad_group_id}: {str(e)}")
+            continue
+        raw_ads = ads_result.get("result", {}).get("Ads", [])
+        for raw_ad in raw_ads:
+            if not isinstance(raw_ad, dict):
+                continue
+            ad_id = normalize_ad_id(raw_ad.get("Id"))
+            if ad_id is not None:
+                ad_ids.append(ad_id)
+                ad_extension_ids_by_ad_id[ad_id] = extract_ad_extension_ids_from_raw_ad(raw_ad)
+
+    return {
+        "ok": True,
+        "status": 200,
+        "payload": {
+            "campaign": campaigns[0],
+            "ad_groups": ad_groups,
+            "ad_ids": ad_ids,
+            "ad_extension_ids_by_ad_id": ad_extension_ids_by_ad_id,
+            "warnings": warnings,
+        },
+    }
+
+
+def build_campaign_enrichment_preview_payload(client: YandexDirectClient, campaign_id: int, requested_theme: Optional[str] = None) -> dict:
+    context_result = collect_campaign_context_for_enrichment(client, campaign_id)
+    if not context_result["ok"]:
+        return context_result
+
+    context_payload = context_result["payload"]
+    theme = normalize_non_empty_string(requested_theme) or infer_campaign_theme(
+        context_payload["campaign"],
+        context_payload["ad_groups"],
+    )
+    if theme is None:
+        return {
+            "ok": False,
+            "status": 400,
+            "payload": {
+                "status": "error",
+                "message": "theme is required because it could not be inferred from the current campaign",
+                "target": "production",
+                "campaign_id": str(campaign_id),
+            },
+        }
+
+    sitelinks, sitelink_warnings = collect_safe_homepage_sitelinks(theme, limit=4)
+    warnings = list(context_payload.get("warnings", []))
+    warnings.extend(sitelink_warnings)
+
+    return {
+        "ok": True,
+        "status": 200,
+        "payload": {
+            "campaign": context_payload["campaign"],
+            "ad_groups": context_payload["ad_groups"],
+            "ad_ids": context_payload["ad_ids"],
+            "theme": theme,
+            "preview": {
+                "tracking_params": build_campaign_enrichment_tracking_params(theme),
+                "sitelinks": sitelinks,
+                "callouts": build_campaign_enrichment_callouts(theme),
+                "group_negative_keywords": build_campaign_enrichment_group_negative_keywords(
+                    context_payload["ad_groups"],
+                    theme,
+                ),
+                "negative_keywords": build_campaign_enrichment_negative_keywords(theme),
+            },
+            "warnings": warnings,
+            "not_confirmed": build_campaign_enrichment_not_confirmed(),
+        },
+    }
+
+
+def attach_sitelink_set_to_ads(client: YandexDirectClient, ad_ids: list[int], sitelink_set_id: int) -> dict:
+    updated_ad_ids: list[str] = []
+    errors: list[dict] = []
+
+    for ad_id in ad_ids:
+        try:
+            result = client.update_text_ad_sitelink_set_id(ad_id=ad_id, sitelink_set_id=sitelink_set_id)
+        except YandexDirectClientError as e:
+            errors.append(
+                {
+                    "ad_id": str(ad_id),
+                    "message": str(e),
+                }
+            )
+            continue
+
+        parsed = parse_update_result(result, "ad")
+        if not parsed["ok"]:
+            errors.append(
+                {
+                    "ad_id": str(ad_id),
+                    "error": parsed["payload"],
+                }
+            )
+            continue
+
+        updated_ad_ids.append(parsed["payload"]["id"])
+
+    return {
+        "updated_ad_ids": updated_ad_ids,
+        "errors": errors,
+    }
+
+
+def ensure_callouts_available(client: YandexDirectClient, callouts: list[str]) -> dict:
+    try:
+        current_callouts_result = client.get_callouts()
+    except YandexDirectClientError as e:
+        return {"ok": False, "status": 502, "payload": {"status": "error", "message": str(e)}}
+
+    existing_by_text: dict[str, int] = {}
+    raw_extensions = current_callouts_result.get("result", {}).get("AdExtensions", [])
+    for raw_extension in raw_extensions:
+        if not isinstance(raw_extension, dict):
+            continue
+        ad_extension_id = normalize_positive_int_id(raw_extension.get("Id"))
+        if ad_extension_id is None:
+            continue
+        callout = raw_extension.get("Callout")
+        if not isinstance(callout, dict):
+            continue
+        callout_text = normalize_callout_text_for_direct(callout.get("CalloutText"))
+        if callout_text is None or callout_text in existing_by_text:
+            continue
+        existing_by_text[callout_text] = ad_extension_id
+
+    ordered_items: list[dict] = []
+    missing_callouts: list[str] = []
+    seen_texts = set()
+    for callout_text in callouts:
+        normalized_text = normalize_callout_text_for_direct(callout_text)
+        if normalized_text is None or normalized_text in seen_texts:
+            continue
+        seen_texts.add(normalized_text)
+        existing_id = existing_by_text.get(normalized_text)
+        if existing_id is not None:
+            ordered_items.append({"id": existing_id, "text": normalized_text})
+        else:
+            missing_callouts.append(normalized_text)
+
+    errors: list[dict] = []
+    if missing_callouts:
+        try:
+            add_result = client.add_callouts(missing_callouts)
+        except YandexDirectClientError as e:
+            return {"ok": False, "status": 502, "payload": {"status": "error", "message": str(e)}}
+
+        add_results = add_result.get("result", {}).get("AddResults", [])
+        if not add_results:
+            return {
+                "ok": False,
+                "status": 502,
+                "payload": {
+                    "status": "error",
+                    "message": "empty AddResults from Yandex Direct for callouts",
+                    "raw": add_result,
+                },
+            }
+
+        for index, add_item in enumerate(add_results):
+            callout_text = missing_callouts[index] if index < len(missing_callouts) else None
+            if "Errors" in add_item:
+                errors.append({"callout": callout_text, "errors": add_item["Errors"]})
+                continue
+            callout_id = normalize_positive_int_id(add_item.get("Id"))
+            if callout_id is None or callout_text is None:
+                errors.append({"callout": callout_text, "message": "missing callout id in Yandex Direct add response"})
+                continue
+            ordered_items.append({"id": callout_id, "text": callout_text})
+
+    if errors and not ordered_items:
+        return {
+            "ok": False,
+            "status": 400,
+            "payload": {
+                "status": "error",
+                "message": "Yandex Direct rejected callout create",
+                "errors": errors,
+            },
+        }
+
+    ordered_items.sort(key=lambda item: callouts.index(item["text"]) if item["text"] in callouts else len(callouts))
+    callout_ids = [item["id"] for item in ordered_items]
+    return {
+        "ok": True,
+        "status": 200,
+        "payload": {
+            "callout_ids": callout_ids,
+            "callout_items": [{"id": str(item["id"]), "text": item["text"]} for item in ordered_items],
+            "errors": errors,
+        },
+    }
+
+
+def attach_callouts_to_ads(
+    client: YandexDirectClient,
+    ad_ids: list[int],
+    existing_ad_extension_ids_by_ad_id: dict[int, list[int]],
+    callout_ids: list[int],
+) -> dict:
+    updated_ad_ids: list[str] = []
+    errors: list[dict] = []
+    warnings: list[str] = []
+
+    for ad_id in ad_ids:
+        existing_ids = existing_ad_extension_ids_by_ad_id.get(ad_id, [])
+        combined_ids: list[int] = []
+        seen_ids = set()
+        for ad_extension_id in existing_ids + callout_ids:
+            if ad_extension_id in seen_ids:
+                continue
+            seen_ids.add(ad_extension_id)
+            combined_ids.append(ad_extension_id)
+
+        if len(combined_ids) > 50:
+            warnings.append(f"ad {ad_id} exceeds the 50-callout limit and was skipped")
+            continue
+
+        try:
+            result = client.set_text_ad_callout_ids(
+                ad_id=ad_id,
+                ad_extension_ids=combined_ids,
+            )
+        except YandexDirectClientError as e:
+            errors.append(
+                {
+                    "ad_id": str(ad_id),
+                    "message": str(e),
+                }
+            )
+            continue
+
+        parsed = parse_update_result(result, "ad")
+        if not parsed["ok"]:
+            errors.append(
+                {
+                    "ad_id": str(ad_id),
+                    "error": parsed["payload"],
+                }
+            )
+            continue
+
+        updated_ad_ids.append(str(ad_id))
+
+    return {
+        "updated_ad_ids": updated_ad_ids,
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+
+def best_effort_cleanup_campaign_entities(client: YandexDirectClient, ad_ids: list[int], ad_group_ids: list[int]) -> dict:
+    cleanup = {
+        "ad_ids_attempted": [str(ad_id) for ad_id in ad_ids],
+        "ad_group_ids_attempted": [str(ad_group_id) for ad_group_id in ad_group_ids],
+        "delete_ads": build_cleanup_action_payload("skipped", results=[], raw=None),
+        "delete_ad_groups": build_cleanup_action_payload("skipped", results=[], raw=None),
+        "warnings": [],
+    }
+
+    if ad_ids:
+        try:
+            delete_ads_result = client.delete_ads(ad_ids)
+            parsed_ads_delete = parse_action_results(delete_ads_result, "DeleteResults", "ads", "delete")
+            if parsed_ads_delete["ok"]:
+                cleanup["delete_ads"] = build_cleanup_action_payload(
+                    "success",
+                    results=parsed_ads_delete["payload"]["results"],
+                    raw=delete_ads_result,
+                )
+            else:
+                cleanup["delete_ads"] = build_cleanup_action_payload(
+                    "error",
+                    message=parsed_ads_delete["payload"]["message"],
+                    results=parsed_ads_delete["payload"].get("results", []),
+                    raw=delete_ads_result,
+                )
+                cleanup["warnings"].append("Some existing ads could not be deleted.")
+                error_codes = collect_action_error_codes(parsed_ads_delete["payload"].get("results", []))
+                if 8300 in error_codes:
+                    cleanup["warnings"].append("Yandex Direct refused to delete part of the existing ads (Code 8300).")
+        except YandexDirectClientError as e:
+            cleanup["delete_ads"] = build_cleanup_action_payload("error", message=str(e), raw=None)
+            cleanup["warnings"].append("Could not complete existing ads cleanup before replace.")
+
+    if ad_group_ids:
+        try:
+            delete_ad_groups_result = client.delete_ad_groups(ad_group_ids)
+            parsed_ad_groups_delete = parse_action_results(delete_ad_groups_result, "DeleteResults", "ad_groups", "delete")
+            if parsed_ad_groups_delete["ok"]:
+                cleanup["delete_ad_groups"] = build_cleanup_action_payload(
+                    "success",
+                    results=parsed_ad_groups_delete["payload"]["results"],
+                    raw=delete_ad_groups_result,
+                )
+            else:
+                cleanup["delete_ad_groups"] = build_cleanup_action_payload(
+                    "error",
+                    message=parsed_ad_groups_delete["payload"]["message"],
+                    results=parsed_ad_groups_delete["payload"].get("results", []),
+                    raw=delete_ad_groups_result,
+                )
+                cleanup["warnings"].append("Some existing ad groups could not be deleted.")
+                error_codes = collect_action_error_codes(parsed_ad_groups_delete["payload"].get("results", []))
+                if 8301 in error_codes:
+                    cleanup["warnings"].append(
+                        "Yandex Direct refused to delete part of the existing ad groups because they still contain ads or conditions (Code 8301)."
+                    )
+        except YandexDirectClientError as e:
+            cleanup["delete_ad_groups"] = build_cleanup_action_payload("error", message=str(e), raw=None)
+            cleanup["warnings"].append("Could not complete existing ad groups cleanup before replace.")
+
+    return cleanup
+
+
+def create_draft_structure_in_production_campaign(
+    client: YandexDirectClient,
+    campaign_id: int,
+    draft_campaign: dict,
+    region_ids: list[int],
+) -> dict:
+    created_ad_group_ids: list[str] = []
+    created_ad_ids: list[str] = []
+    created_ad_groups: list[dict] = []
+    created_ads: list[dict] = []
+    errors: list[dict] = []
+
+    raw_ad_groups = draft_campaign.get("ad_groups")
+    if not isinstance(raw_ad_groups, list) or not raw_ad_groups:
+        return {
+            "created_any": False,
+            "created_ad_group_ids": created_ad_group_ids,
+            "created_ad_ids": created_ad_ids,
+            "created_ad_groups": created_ad_groups,
+            "created_ads": created_ads,
+            "errors": [
+                {
+                    "entity": "draft_campaign",
+                    "message": "draft_campaign.ad_groups must be a non-empty array",
+                }
+            ],
+        }
+
+    for ad_group_index, raw_ad_group in enumerate(raw_ad_groups):
+        if not isinstance(raw_ad_group, dict):
+            errors.append(
+                {
+                    "entity": "ad_group",
+                    "ad_group_index": ad_group_index,
+                    "message": "draft ad_group must be an object",
+                }
+            )
+            continue
+
+        ad_group_name = normalize_non_empty_string(raw_ad_group.get("group_name"))
+        if ad_group_name is None:
+            errors.append(
+                {
+                    "entity": "ad_group",
+                    "ad_group_index": ad_group_index,
+                    "message": "draft ad_group group_name must be a non-empty string",
+                }
+            )
+            continue
+
+        negative_keywords = normalize_negative_keywords(raw_ad_group.get("negative_keywords"))
+        if raw_ad_group.get("negative_keywords") is not None and negative_keywords is None:
+            negative_keywords = []
+
+        try:
+            create_ad_group_result = client.add_unified_ad_group_production(
+                campaign_id=campaign_id,
+                name=ad_group_name,
+                region_ids=region_ids,
+                offer_retargeting="NO",
+                negative_keywords=negative_keywords,
+            )
+        except YandexDirectClientError as e:
+            errors.append(
+                {
+                    "entity": "ad_group",
+                    "ad_group_index": ad_group_index,
+                    "group_name": ad_group_name,
+                    "message": str(e),
+                }
+            )
+            continue
+
+        parsed_ad_group = parse_add_result(create_ad_group_result, "ad_group")
+        if not parsed_ad_group["ok"]:
+            errors.append(
+                {
+                    "entity": "ad_group",
+                    "ad_group_index": ad_group_index,
+                    "group_name": ad_group_name,
+                    "error": parsed_ad_group["payload"],
+                }
+            )
+            continue
+
+        created_ad_group_id = parsed_ad_group["payload"]["id"]
+        created_ad_group_ids.append(created_ad_group_id)
+        created_ad_groups.append(
+            {
+                "id": created_ad_group_id,
+                "group_name": ad_group_name,
+            }
+        )
+
+        raw_ads = raw_ad_group.get("ads")
+        if not isinstance(raw_ads, list) or not raw_ads:
+            errors.append(
+                {
+                    "entity": "ad_group",
+                    "ad_group_index": ad_group_index,
+                    "group_name": ad_group_name,
+                    "message": "draft ad_group ads must be a non-empty array",
+                }
+            )
+            continue
+
+        for ad_index, raw_ad in enumerate(raw_ads):
+            if not isinstance(raw_ad, dict):
+                errors.append(
+                    {
+                        "entity": "ad",
+                        "ad_group_index": ad_group_index,
+                        "ad_index": ad_index,
+                        "message": "draft ad must be an object",
+                    }
+                )
+                continue
+
+            normalize_draft_ad_images(raw_ad)
+            title = normalize_non_empty_string(raw_ad.get("title"))
+            text = normalize_non_empty_string(raw_ad.get("text"))
+            href = normalize_draft_final_url(raw_ad.get("final_url"))
+            ad_image_hash = normalize_non_empty_string(raw_ad.get("ad_image_hash"))
+
+            if title is None or text is None or href is None:
+                errors.append(
+                    {
+                        "entity": "ad",
+                        "ad_group_index": ad_group_index,
+                        "ad_index": ad_index,
+                        "group_name": ad_group_name,
+                        "message": "draft ad must contain non-empty title, text, final_url",
+                    }
+                )
+                continue
+
+            try:
+                create_ad_result = client.add_text_ad_production(
+                    ad_group_id=int(created_ad_group_id),
+                    title=title,
+                    text=text,
+                    href=href,
+                    ad_image_hash=ad_image_hash,
+                )
+            except YandexDirectClientError as e:
+                errors.append(
+                    {
+                        "entity": "ad",
+                        "ad_group_index": ad_group_index,
+                        "ad_index": ad_index,
+                        "group_name": ad_group_name,
+                        "title": title,
+                        "message": str(e),
+                    }
+                )
+                continue
+
+            parsed_ad = parse_add_result(create_ad_result, "ad")
+            if not parsed_ad["ok"]:
+                errors.append(
+                    {
+                        "entity": "ad",
+                        "ad_group_index": ad_group_index,
+                        "ad_index": ad_index,
+                        "group_name": ad_group_name,
+                        "title": title,
+                        "error": parsed_ad["payload"],
+                    }
+                )
+                continue
+
+            created_ad_id = parsed_ad["payload"]["id"]
+            created_ad_ids.append(created_ad_id)
+            created_ads.append(
+                {
+                    "id": created_ad_id,
+                    "ad_group_id": created_ad_group_id,
+                    "title": title,
+                }
+            )
+
+    return {
+        "created_any": bool(created_ad_group_ids or created_ad_ids),
+        "created_ad_group_ids": created_ad_group_ids,
+        "created_ad_ids": created_ad_ids,
+        "created_ad_groups": created_ad_groups,
+        "created_ads": created_ads,
+        "errors": errors,
     }
 
 
@@ -3122,12 +4665,17 @@ class Handler(BaseHTTPRequestHandler):
             ad_groups = []
 
             for ad_group in raw_ad_groups:
+                negative_keywords = []
+                raw_negative_keywords = ad_group.get("NegativeKeywords")
+                if isinstance(raw_negative_keywords, dict):
+                    negative_keywords = raw_negative_keywords.get("Items", []) or []
                 ad_groups.append(
                     {
                         "id": str(ad_group.get("Id")),
                         "name": ad_group.get("Name"),
                         "campaign_id": str(ad_group.get("CampaignId")),
                         "region_ids": ad_group.get("RegionIds", []),
+                        "negative_keywords": negative_keywords,
                         "status": ad_group.get("Status"),
                         "serving_status": ad_group.get("ServingStatus"),
                         "type": ad_group.get("Type"),
@@ -3551,6 +5099,171 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if self.path == "/apply_site_images_to_all_draft_ads":
+            theme = normalize_non_empty_string(data.get("theme"))
+            if theme is None:
+                self._send_json({"status": "error", "message": "theme must be a non-empty string"}, 400)
+                return
+
+            images_per_ad = normalize_non_negative_int(data.get("images_per_ad", 1))
+            if images_per_ad is None or images_per_ad <= 0:
+                self._send_json({"status": "error", "message": "images_per_ad must be a positive integer"}, 400)
+                return
+
+            state = deep_copy_json(RUNTIME_STATE)
+            draft_campaign = state.get("draft_campaign")
+            if not isinstance(draft_campaign, dict):
+                self._send_json({"status": "error", "message": "draft_campaign is not initialized"}, 409)
+                return
+
+            normalize_draft_campaign_images(draft_campaign)
+            ad_references = enumerate_draft_ad_references(draft_campaign)
+            if not ad_references:
+                self._send_json({"status": "error", "message": "draft_campaign does not contain any ads"}, 400)
+                return
+
+            discovery = find_site_images_for_theme_internal(theme=theme, limit=min(images_per_ad, 10))
+            if not discovery["ok"]:
+                self._send_json(discovery["payload"], discovery["status"])
+                return
+
+            selected_matches = discovery["payload"].get("matches", [])
+            uploaded_items = []
+            updated_ads = []
+            warnings = []
+
+            if not selected_matches:
+                warnings.append(
+                    {
+                        "message": "no verified site images found for theme",
+                        "theme": theme,
+                        "affected_ads": len(ad_references),
+                    }
+                )
+            else:
+                for selected_match in selected_matches:
+                    download_result = download_site_image_bytes(selected_match.get("image_url", ""))
+                    if not download_result["ok"]:
+                        warnings.append(
+                            {
+                                "message": "failed to download verified site image",
+                                "image_url": selected_match.get("image_url"),
+                                "raw": download_result["payload"],
+                            }
+                        )
+                        continue
+
+                    encoded_image = base64.b64encode(download_result["payload"]["image_bytes"]).decode("ascii")
+                    filename = download_result["payload"]["filename"]
+                    upload_result = upload_ad_image_via_direct(
+                        target="production",
+                        name=filename,
+                        image_data_base64=encoded_image,
+                    )
+                    if not upload_result["ok"]:
+                        warnings.append(
+                            {
+                                "message": "failed to upload verified site image to Yandex Direct",
+                                "image_url": selected_match.get("image_url"),
+                                "raw": upload_result["payload"],
+                            }
+                        )
+                        continue
+
+                    uploaded_items.append(
+                        {
+                            "match": selected_match,
+                            "ad_image_hash": upload_result["payload"]["ad_image_hash"],
+                        }
+                    )
+
+            if not uploaded_items:
+                state["draft_meta"]["last_action"] = "apply_site_images_to_all_draft_ads"
+                save_runtime_state(state)
+                self._send_json(
+                    {
+                        "status": "success",
+                        "theme": theme,
+                        "updated_ads": [],
+                        "warnings": warnings,
+                    },
+                    200,
+                )
+                return
+
+            if not isinstance(state.get("media_library"), list):
+                state["media_library"] = []
+
+            uploaded_hashes = []
+            for uploaded_item in uploaded_items:
+                uploaded_hash = uploaded_item["ad_image_hash"]
+                uploaded_hashes.append(uploaded_hash)
+                add_yandex_uploaded_image_to_state(state, uploaded_hash)
+                state["media_library"].append(
+                    {
+                        "type": "image",
+                        "source": "artfarfor_site",
+                        "theme": theme,
+                        "page_url": uploaded_item["match"]["page_url"],
+                        "image_url": uploaded_item["match"]["image_url"],
+                    }
+                )
+
+            if len(uploaded_hashes) < images_per_ad:
+                warnings.append(
+                    {
+                        "message": "fewer verified theme images were uploaded than requested",
+                        "requested": images_per_ad,
+                        "uploaded": len(uploaded_hashes),
+                    }
+                )
+
+            for ad_reference in ad_references:
+                linked = link_image_hashes_to_draft_state(
+                    state=state,
+                    scope=ad_reference["scope"],
+                    ad_index=ad_reference["ad_index"],
+                    ad_group_index=ad_reference.get("ad_group_index"),
+                    ad_image_hashes=uploaded_hashes,
+                )
+                if not linked["ok"]:
+                    warnings.append(
+                        {
+                            "message": "failed to link uploaded images to draft ad",
+                            "scope": ad_reference["scope"],
+                            "ad_index": ad_reference["ad_index"],
+                            **({} if "ad_group_index" not in ad_reference else {"ad_group_index": ad_reference["ad_group_index"]}),
+                            "raw": linked["payload"],
+                        }
+                    )
+                    continue
+
+                state = linked["payload"]["state"]
+                draft_fragment = linked["payload"]["draft_fragment"]
+                updated_ads.append(
+                    {
+                        "scope": ad_reference["scope"],
+                        "ad_index": ad_reference["ad_index"],
+                        **({} if "ad_group_index" not in ad_reference else {"ad_group_index": ad_reference["ad_group_index"]}),
+                        "ad_image_hash": draft_fragment.get("ad_image_hash"),
+                        "ad_image_hashes": draft_fragment.get("ad_image_hashes", []),
+                    }
+                )
+
+            state["draft_meta"]["last_action"] = "apply_site_images_to_all_draft_ads"
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "theme": theme,
+                    "updated_ads": updated_ads,
+                    "warnings": warnings,
+                },
+                200,
+            )
+            return
+
         if self.path == "/draft_campaign_from_theme":
             theme = data.get("theme")
             if not isinstance(theme, str) or not theme.strip():
@@ -3581,6 +5294,64 @@ class Handler(BaseHTTPRequestHandler):
             state["created_campaign_id"] = None
             state["draft_meta"]["theme"] = theme.strip()
             state["draft_meta"]["last_action"] = "draft_campaign_from_theme"
+            state["draft_meta"]["revision_count"] = 0
+
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "session_mode": state["session_mode"],
+                    "draft_campaign": state["draft_campaign"],
+                },
+                200,
+            )
+            return
+
+        if self.path == "/rebuild_draft_campaign":
+            theme = data.get("theme")
+            if not isinstance(theme, str) or not theme.strip():
+                self._send_json({"status": "error", "message": "theme must be a non-empty string"}, 400)
+                return
+
+            ad_groups_count = normalize_non_negative_int(data.get("ad_groups_count", 4))
+            if ad_groups_count is None or ad_groups_count <= 0:
+                self._send_json({"status": "error", "message": "ad_groups_count must be a positive integer"}, 400)
+                return
+
+            ads_per_group = normalize_non_negative_int(data.get("ads_per_group", 4))
+            if ads_per_group is None or ads_per_group <= 0:
+                self._send_json({"status": "error", "message": "ads_per_group must be a positive integer"}, 400)
+                return
+
+            state = build_default_runtime_state()
+            current_state = deep_copy_json(RUNTIME_STATE)
+            approved_patterns = current_state.get("approved_patterns")
+            if not isinstance(approved_patterns, dict):
+                approved_patterns = build_default_approved_patterns()
+            state["session_mode"] = "review_draft"
+            state["approved_patterns"] = deep_copy_json(approved_patterns)
+            if isinstance(current_state.get("media_library"), list):
+                state["media_library"] = deep_copy_json(current_state["media_library"])
+            state["draft_media"] = []
+            state["last_uploaded_image_hash"] = current_state.get("last_uploaded_image_hash")
+            state["creative_spec"] = deep_copy_json(current_state.get("creative_spec"))
+            state["render_task"] = deep_copy_json(current_state.get("render_task"))
+            state["render_result_url"] = current_state.get("render_result_url")
+            state["draft_campaign"] = apply_approved_patterns_to_draft(
+                theme.strip(),
+                build_rebuild_draft_campaign(
+                    theme=theme.strip(),
+                    ad_groups_count=ad_groups_count,
+                    ads_per_group=ads_per_group,
+                ),
+                state["approved_patterns"],
+            )
+            state["campaign_payload"] = None
+            state["validation_result"] = None
+            state["created_campaign_id"] = None
+            state["draft_meta"]["theme"] = theme.strip()
+            state["draft_meta"]["last_action"] = "rebuild_draft_campaign"
             state["draft_meta"]["revision_count"] = 0
 
             save_runtime_state(state)
@@ -4319,6 +6090,456 @@ class Handler(BaseHTTPRequestHandler):
                         "network_placement_types": dict(YandexDirectClient.DEFAULT_NETWORK_PLACEMENT_TYPES),
                         "time_targeting_sent": False,
                     },
+                },
+                200,
+            )
+            return
+
+        if self.path == "/apply_draft_to_production":
+            confirm = resolve_confirm(data)
+            if not confirm:
+                self._send_json(
+                    {"status": "error", "message": "apply_draft_to_production requires explicit confirm=true", "target": "production"},
+                    400,
+                )
+                return
+
+            campaign_id = normalize_campaign_id(data.get("campaign_id"))
+            if campaign_id is None:
+                self._send_json({"status": "error", "message": "campaign_id must be a positive integer or numeric string"}, 400)
+                return
+
+            state = deep_copy_json(RUNTIME_STATE)
+            draft_campaign = state.get("draft_campaign")
+            if not isinstance(draft_campaign, dict):
+                self._send_json({"status": "error", "message": "draft_campaign is not initialized"}, 409)
+                return
+
+            normalize_draft_campaign_images(draft_campaign)
+            client = YandexDirectClient.for_target("production")
+
+            try:
+                collected_entities = collect_campaign_entities_for_replace(client, campaign_id)
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": "production", "campaign_id": str(campaign_id)},
+                    502,
+                )
+                return
+
+            if not collected_entities["ok"]:
+                self._send_json(collected_entities["payload"], collected_entities["status"])
+                return
+
+            collected_payload = collected_entities["payload"]
+            cleanup = best_effort_cleanup_campaign_entities(
+                client=client,
+                ad_ids=collected_payload["ad_ids"],
+                ad_group_ids=collected_payload["ad_group_ids"],
+            )
+            created = create_draft_structure_in_production_campaign(
+                client=client,
+                campaign_id=campaign_id,
+                draft_campaign=draft_campaign,
+                region_ids=collected_payload["region_ids"],
+            )
+
+            warnings = list(collected_payload.get("warnings", []))
+            warnings.extend(cleanup.get("warnings", []))
+            if created["errors"]:
+                warnings.append("Some new ad groups or ads could not be created from the current draft.")
+
+            if not created["created_any"]:
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": "draft apply did not create any new ad groups or ads",
+                        "target": "production",
+                        "campaign_id": str(campaign_id),
+                        "cleanup": cleanup,
+                        "created": {
+                            "ad_group_ids": created["created_ad_group_ids"],
+                            "ad_ids": created["created_ad_ids"],
+                            "ad_groups": created["created_ad_groups"],
+                            "ads": created["created_ads"],
+                            "errors": created["errors"],
+                            "region_ids": collected_payload["region_ids"],
+                        },
+                        "warnings": warnings,
+                    },
+                    400,
+                )
+                return
+
+            state["draft_meta"]["last_action"] = "apply_draft_to_production"
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "target": "production",
+                    "campaign_id": str(campaign_id),
+                    "cleanup": cleanup,
+                    "created": {
+                        "ad_group_ids": created["created_ad_group_ids"],
+                        "ad_ids": created["created_ad_ids"],
+                        "ad_groups": created["created_ad_groups"],
+                        "ads": created["created_ads"],
+                        "errors": created["errors"],
+                        "region_ids": collected_payload["region_ids"],
+                    },
+                    "warnings": warnings,
+                },
+                200,
+            )
+            return
+
+        if self.path == "/preview_competitor_analysis":
+            theme = normalize_non_empty_string(data.get("theme"))
+            if theme is None:
+                self._send_json({"status": "error", "message": "theme must be a non-empty string"}, 400)
+                return
+
+            raw_competitors = data.get("competitors", DEFAULT_COMPETITOR_ANALYSIS_URLS)
+            if not isinstance(raw_competitors, list) or not raw_competitors:
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": "competitors must be a non-empty array of allowed competitor URLs",
+                    },
+                    400,
+                )
+                return
+
+            competitors: list[str] = []
+            for item in raw_competitors:
+                normalized_item = normalize_non_empty_string(item)
+                if normalized_item is None:
+                    self._send_json(
+                        {
+                            "status": "error",
+                            "message": "each competitor URL must be a non-empty string",
+                        },
+                        400,
+                    )
+                    return
+                competitors.append(normalized_item)
+
+            preview_result = build_competitor_analysis_preview_payload(theme=theme, competitors=competitors)
+            self._send_json(preview_result["payload"], preview_result["status"])
+            return
+
+        if self.path == "/preview_campaign_enrichment":
+            campaign_id = normalize_campaign_id(data.get("campaign_id"))
+            if campaign_id is None:
+                self._send_json({"status": "error", "message": "campaign_id must be a positive integer or numeric string"}, 400)
+                return
+
+            theme = normalize_non_empty_string(data.get("theme"))
+            client = YandexDirectClient.for_target("production")
+
+            try:
+                preview_result = build_campaign_enrichment_preview_payload(
+                    client=client,
+                    campaign_id=campaign_id,
+                    requested_theme=theme,
+                )
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": "production", "campaign_id": str(campaign_id)},
+                    502,
+                )
+                return
+
+            if not preview_result["ok"]:
+                self._send_json(preview_result["payload"], preview_result["status"])
+                return
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "target": "production",
+                    "campaign_id": str(campaign_id),
+                    "theme": preview_result["payload"]["theme"],
+                    "preview": preview_result["payload"]["preview"],
+                    "warnings": preview_result["payload"]["warnings"],
+                    "not_confirmed": preview_result["payload"]["not_confirmed"],
+                },
+                200,
+            )
+            return
+
+        if self.path == "/apply_campaign_enrichment":
+            confirm = resolve_confirm(data)
+            if not confirm:
+                self._send_json(
+                    {"status": "error", "message": "apply_campaign_enrichment requires explicit confirm=true", "target": "production"},
+                    400,
+                )
+                return
+
+            campaign_id = normalize_campaign_id(data.get("campaign_id"))
+            if campaign_id is None:
+                self._send_json({"status": "error", "message": "campaign_id must be a positive integer or numeric string"}, 400)
+                return
+
+            theme = normalize_non_empty_string(data.get("theme"))
+            client = YandexDirectClient.for_target("production")
+
+            try:
+                preview_result = build_campaign_enrichment_preview_payload(
+                    client=client,
+                    campaign_id=campaign_id,
+                    requested_theme=theme,
+                )
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": "production", "campaign_id": str(campaign_id)},
+                    502,
+                )
+                return
+
+            if not preview_result["ok"]:
+                self._send_json(preview_result["payload"], preview_result["status"])
+                return
+
+            preview_payload = preview_result["payload"]
+            preview = preview_payload["preview"]
+            warnings = list(preview_payload["warnings"])
+            applied = {}
+            errors = []
+            current_counter_ids = []
+            for item in preview_payload["campaign"].get("UnifiedCampaign", {}).get("CounterIds", {}).get("Items", []):
+                normalized_item = normalize_positive_int_id(item)
+                if normalized_item is not None:
+                    current_counter_ids.append(normalized_item)
+            current_negative_keyword_shared_set_ids = []
+            for item in (
+                preview_payload["campaign"]
+                .get("UnifiedCampaign", {})
+                .get("NegativeKeywordSharedSetIds", {})
+                .get("Items", [])
+            ):
+                normalized_item = normalize_positive_int_id(item)
+                if normalized_item is not None:
+                    current_negative_keyword_shared_set_ids.append(normalized_item)
+
+            try:
+                tracking_result = client.update_campaign_tracking_params(
+                    campaign_id=campaign_id,
+                    tracking_params=preview["tracking_params"],
+                    counter_ids=current_counter_ids,
+                    negative_keyword_shared_set_ids=current_negative_keyword_shared_set_ids,
+                )
+                parsed_tracking = parse_update_result(tracking_result, "campaign")
+                if parsed_tracking["ok"]:
+                    applied["tracking_params"] = preview["tracking_params"]
+                else:
+                    errors.append({"step": "tracking_params", "error": parsed_tracking["payload"]})
+            except YandexDirectClientError as e:
+                errors.append({"step": "tracking_params", "message": str(e)})
+
+            try:
+                sitelinks_result = client.add_sitelinks(
+                    sitelinks=[
+                        {
+                            "Title": item["title"],
+                            "Href": item["href"],
+                        }
+                        for item in preview["sitelinks"]
+                    ]
+                )
+                parsed_sitelinks = parse_add_result(sitelinks_result, "sitelink_set")
+                if parsed_sitelinks["ok"]:
+                    sitelink_set_id = int(parsed_sitelinks["payload"]["id"])
+                    attached_sitelinks = attach_sitelink_set_to_ads(
+                        client=client,
+                        ad_ids=preview_payload["ad_ids"],
+                        sitelink_set_id=sitelink_set_id,
+                    )
+                    applied["sitelink_set_id"] = str(sitelink_set_id)
+                    applied["sitelinks"] = preview["sitelinks"]
+                    applied["sitelinks_attached_ad_ids"] = attached_sitelinks["updated_ad_ids"]
+                    if attached_sitelinks["errors"]:
+                        warnings.append("Could not attach the new sitelink set to some existing ads.")
+                        errors.append({"step": "attach_sitelinks_to_ads", "errors": attached_sitelinks["errors"]})
+                    if not preview_payload["ad_ids"]:
+                        warnings.append("Current campaign has no ads available for sitelink attachment.")
+                else:
+                    errors.append({"step": "create_sitelinks", "error": parsed_sitelinks["payload"]})
+            except YandexDirectClientError as e:
+                errors.append({"step": "create_sitelinks", "message": str(e)})
+
+            callouts_result = ensure_callouts_available(
+                client=client,
+                callouts=preview["callouts"],
+            )
+            if callouts_result["ok"]:
+                callout_payload = callouts_result["payload"]
+                if callout_payload["errors"]:
+                    warnings.append("Some callouts could not be created and were skipped.")
+                    errors.append({"step": "create_callouts", "errors": callout_payload["errors"]})
+                if callout_payload["callout_ids"]:
+                    attached_callouts = attach_callouts_to_ads(
+                        client=client,
+                        ad_ids=preview_payload["ad_ids"],
+                        existing_ad_extension_ids_by_ad_id=preview_payload.get("ad_extension_ids_by_ad_id", {}),
+                        callout_ids=callout_payload["callout_ids"],
+                    )
+                    applied["callout_apply_mechanism"] = "AdExtensions.add/get + Ads.update(TextAd.CalloutSetting)"
+                    applied["callout_ids"] = [str(item) for item in callout_payload["callout_ids"]]
+                    applied["callouts"] = preview["callouts"]
+                    applied["callouts_attached_ad_ids"] = attached_callouts["updated_ad_ids"]
+                    if attached_callouts["warnings"]:
+                        warnings.extend(attached_callouts["warnings"])
+                    if attached_callouts["errors"]:
+                        warnings.append("Could not attach the new callouts to some existing ads.")
+                        errors.append({"step": "attach_callouts_to_ads", "errors": attached_callouts["errors"]})
+                    if not preview_payload["ad_ids"]:
+                        warnings.append("Current campaign has no ads available for callout attachment.")
+            else:
+                errors.append({"step": "create_callouts", "error": callouts_result["payload"]})
+
+            group_negative_keywords_updated_ad_group_ids: list[str] = []
+            group_negative_keywords_errors: list[dict] = []
+            for item in preview.get("group_negative_keywords", []):
+                if not isinstance(item, dict):
+                    continue
+                ad_group_id = normalize_positive_int_id(item.get("ad_group_id"))
+                if ad_group_id is None:
+                    continue
+
+                current_negative_keywords = None
+                for raw_ad_group in preview_payload.get("ad_groups", []):
+                    if not isinstance(raw_ad_group, dict):
+                        continue
+                    raw_ad_group_id = normalize_positive_int_id(raw_ad_group.get("Id") or raw_ad_group.get("id"))
+                    if raw_ad_group_id != ad_group_id:
+                        continue
+                    current_negative_keywords = normalize_negative_keywords(
+                        raw_ad_group.get("NegativeKeywords", {}).get("Items")
+                        if isinstance(raw_ad_group.get("NegativeKeywords"), dict)
+                        else raw_ad_group.get("negative_keywords")
+                    ) or []
+                    break
+
+                prepared_negative_keywords = normalize_negative_keywords(item.get("negative_keywords")) or []
+                merged_negative_keywords = []
+                seen_negative_keywords = set()
+                for keyword in (current_negative_keywords or []) + prepared_negative_keywords:
+                    normalized_keyword = normalize_non_empty_string(keyword)
+                    if normalized_keyword is None or normalized_keyword in seen_negative_keywords:
+                        continue
+                    seen_negative_keywords.add(normalized_keyword)
+                    merged_negative_keywords.append(normalized_keyword)
+
+                if current_negative_keywords == merged_negative_keywords:
+                    continue
+
+                try:
+                    update_group_result = client.update_ad_group_negative_keywords(
+                        ad_group_id=ad_group_id,
+                        negative_keywords=merged_negative_keywords,
+                    )
+                except YandexDirectClientError as e:
+                    group_negative_keywords_errors.append(
+                        {
+                            "ad_group_id": str(ad_group_id),
+                            "message": str(e),
+                        }
+                    )
+                    continue
+
+                parsed_update_group = parse_update_result(update_group_result, "ad_group")
+                if not parsed_update_group["ok"]:
+                    group_negative_keywords_errors.append(
+                        {
+                            "ad_group_id": str(ad_group_id),
+                            "error": parsed_update_group["payload"],
+                        }
+                    )
+                    continue
+
+                group_negative_keywords_updated_ad_group_ids.append(str(ad_group_id))
+
+            if preview.get("group_negative_keywords"):
+                applied["group_negative_keywords"] = preview["group_negative_keywords"]
+                applied["group_negative_keywords_updated_ad_group_ids"] = group_negative_keywords_updated_ad_group_ids
+                if group_negative_keywords_errors:
+                    warnings.append("Could not apply group-level negative keywords to some ad groups.")
+                    errors.append({"step": "apply_group_negative_keywords", "errors": group_negative_keywords_errors})
+
+            try:
+                negative_set_name = f"OpenClaw {preview_payload['theme']} {datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+                negative_set_result = client.add_negative_keyword_shared_set(
+                    name=negative_set_name,
+                    negative_keywords=preview["negative_keywords"],
+                )
+                parsed_negative_set = parse_add_result(negative_set_result, "negative_keyword_shared_set")
+                if parsed_negative_set["ok"]:
+                    shared_set_id = normalize_positive_int_id(parsed_negative_set["payload"]["id"])
+                    current_shared_set_ids = []
+                    for item in preview_payload["campaign"].get("UnifiedCampaign", {}).get("NegativeKeywordSharedSetIds", {}).get("Items", []):
+                        normalized_item = normalize_positive_int_id(item)
+                        if normalized_item is not None:
+                            current_shared_set_ids.append(normalized_item)
+
+                    if shared_set_id is not None and shared_set_id not in current_shared_set_ids:
+                        updated_shared_set_ids = current_shared_set_ids + [shared_set_id]
+                    else:
+                        updated_shared_set_ids = current_shared_set_ids
+
+                    if len(updated_shared_set_ids) > 3:
+                        warnings.append("NegativeKeywordSharedSetIds limit prevented attaching the new shared set to the campaign.")
+                        errors.append(
+                            {
+                                "step": "attach_negative_keywords",
+                                "message": "NegativeKeywordSharedSetIds supports at most 3 items",
+                            }
+                        )
+                    elif shared_set_id is not None:
+                        attach_result = client.update_campaign_negative_keyword_shared_set_ids(
+                            campaign_id=campaign_id,
+                            shared_set_ids=updated_shared_set_ids,
+                        )
+                        parsed_attach = parse_update_result(attach_result, "campaign")
+                        if parsed_attach["ok"]:
+                            applied["shared_set_id"] = str(shared_set_id)
+                            applied["shared_set_ids"] = [str(item) for item in updated_shared_set_ids]
+                            applied["negative_keywords"] = preview["negative_keywords"]
+                        else:
+                            errors.append({"step": "attach_negative_keywords", "error": parsed_attach["payload"]})
+                else:
+                    errors.append({"step": "create_negative_keyword_shared_set", "error": parsed_negative_set["payload"]})
+            except YandexDirectClientError as e:
+                errors.append({"step": "create_negative_keyword_shared_set", "message": str(e)})
+
+            if not applied:
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": "campaign enrichment did not apply any confirmed changes",
+                        "target": "production",
+                        "campaign_id": str(campaign_id),
+                        "theme": preview_payload["theme"],
+                        "errors": errors,
+                        "warnings": warnings,
+                        "not_confirmed": preview_payload["not_confirmed"],
+                    },
+                    400,
+                )
+                return
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "target": "production",
+                    "campaign_id": str(campaign_id),
+                    "theme": preview_payload["theme"],
+                    "applied": applied,
+                    "warnings": warnings,
+                    "errors": errors,
+                    "not_confirmed": preview_payload["not_confirmed"],
                 },
                 200,
             )
@@ -5220,6 +7441,23 @@ class Handler(BaseHTTPRequestHandler):
 
             for ad in raw_ads:
                 text_ad = ad.get("TextAd", {})
+                raw_ad_extensions = text_ad.get("AdExtensions", [])
+                ad_extensions = []
+                callout_ids = []
+                if isinstance(raw_ad_extensions, list):
+                    for raw_ad_extension in raw_ad_extensions:
+                        if not isinstance(raw_ad_extension, dict):
+                            continue
+                        ad_extension_id = normalize_positive_int_id(raw_ad_extension.get("AdExtensionId"))
+                        ad_extension_type = normalize_non_empty_string(raw_ad_extension.get("Type"))
+                        if ad_extension_id is not None:
+                            callout_ids.append(str(ad_extension_id))
+                        ad_extensions.append(
+                            {
+                                "ad_extension_id": str(ad_extension_id) if ad_extension_id is not None else None,
+                                "type": ad_extension_type,
+                            }
+                        )
                 ads.append(
                     {
                         "id": str(ad.get("Id")),
@@ -5235,6 +7473,13 @@ class Handler(BaseHTTPRequestHandler):
                         "display_url_path": text_ad.get("DisplayUrlPath"),
                         "ad_image_hash": text_ad.get("AdImageHash"),
                         "ad_image_moderation": text_ad.get("AdImageModeration"),
+                        "sitelink_set_id": (
+                            str(text_ad.get("SitelinkSetId"))
+                            if text_ad.get("SitelinkSetId") is not None
+                            else None
+                        ),
+                        "callout_ids": callout_ids,
+                        "ad_extensions": ad_extensions,
                     }
                 )
 

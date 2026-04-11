@@ -123,6 +123,16 @@ Rules:
 - after success, return only a short result
 - after error, return only a short understandable reason
 - for destructive/live actions, ask one short confirmation question and then pass technical confirmation internally
+- if the user asks for a new campaign from scratch, treat it as a rebuild intent, not as editing the current campaign
+- if `campaign_id` is present together with a rebuild request, do not let it override the rebuild intent
+- for rebuild intent, prefer one end-to-end flow: rebuild draft -> mass image apply -> short preview -> short confirmation -> production apply
+- in that end-to-end flow, never expose route names, raw backend fragments, or technical progress chatter
+- after successful rebuild preview, summarize only the human result, for example: "Готово. Собрал новую кампанию: 4 группы, по 4 объявления, изображения подобраны."
+- after successful production apply with partial cleanup problems, summarize it briefly in human language instead of raw API errors
+- if the user asks to improve an existing campaign, treat it as campaign enrichment, not as rebuild
+- for campaign enrichment, prefer one end-to-end flow: short preview -> short confirmation -> production apply
+- in campaign enrichment, preview only confirmed items such as UTM/tracking params, 4 sitelinks, 4 callouts, campaign negative keywords, and group-level negative keywords when they are confirmed by the current backend
+- if interests and habits, WordStat, or competitor analysis are not confirmed by the current backend, say that briefly and do not invent support
 
 ## Continuity
 

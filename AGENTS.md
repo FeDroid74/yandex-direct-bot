@@ -251,6 +251,10 @@ If a confirmed direct backend route already exists, use it as the primary path.
 Do not prefer text instruction flow or `revise_campaign_draft` for tasks that already have direct routes.
 
 Use direct routes first for:
+- rebuild draft campaign
+- apply site images to all draft ads
+- preview campaign enrichment
+- apply campaign enrichment
 - update draft ad
 - get draft ad
 - update draft ad group
@@ -258,8 +262,139 @@ Use direct routes first for:
 - get whole draft campaign
 - link image to draft ad
 - apply site image to draft ad
+- apply draft to production
 - delete ads
 - delete ad groups
+
+### Intent: NEW_CAMPAIGN_REBUILD
+
+If the user asks for a completely new campaign from scratch, set:
+- `intent = NEW_CAMPAIGN_REBUILD`
+
+Trigger examples and close variants:
+- "разрабатываем новую рекламную кампанию"
+- "разрабатываем совершенно новую рекламную кампанию"
+- "создай новую кампанию"
+- "собери новую кампанию"
+- "построй новую рекламную кампанию"
+- "с нуля сделай кампанию"
+- "переделай кампанию полностью с нуля"
+- "нужна новая рекламная кампания"
+- "делаем новую кампанию"
+
+Priority rule:
+- `NEW_CAMPAIGN_REBUILD` has priority over modify-existing flow
+- this must still apply if the same message also contains `campaign_id`
+
+Routing rule for `NEW_CAMPAIGN_REBUILD`:
+- build a new draft structure from scratch
+- use the new theme from the user request as the source of truth
+- use current project constraints and current backend draft flow
+- do NOT use `revise_campaign_draft` as the primary path
+- do NOT treat existing live groups/ads as the editable base
+- do NOT inherit old theme, old brand, old texts, old ad groups, or old ads into the new structure
+
+If `campaign_id` is present in the same request:
+- treat it only as `rebuild_target_campaign_id` for possible future replace/apply flow
+- do NOT use the current live campaign structure as the basis for the new draft
+
+Telegram wording in this mode:
+- do not say that you are editing or updating the existing campaign
+- say instead:
+  - "Соберу новую структуру кампании с нуля под заданную тему."
+  - "Собрал новую структуру кампании. Показываю результат."
+
+### End-to-End Rebuild Orchestration
+
+For `NEW_CAMPAIGN_REBUILD`, prefer one unified Telegram execution flow:
+
+1. draft rebuild
+   - call the direct rebuild draft route
+   - build the new draft structure from scratch for the new theme
+2. mass image apply
+   - call the direct route that applies site images to all draft ads
+   - use the same new theme as the source of truth
+3. short preview
+   - return one short human-readable result
+   - do not show JSON, route names, curl, raw fragments, or internal steps
+   - preferred wording:
+     - "Готово. Собрал новую кампанию: 4 группы, по 4 объявления, изображения подобраны."
+4. production confirmation
+   - if `rebuild_target_campaign_id` is known or the user asks to apply in production:
+     - ask one short confirmation question
+     - preferred wording:
+       - "Заменить текущую структуру кампании 708428061 на новую?"
+   - do not mention route names or `confirm=true`
+5. production apply
+   - after a clear human confirmation such as "Да" or "Подтверждаю":
+     - call the direct production apply route
+     - pass technical confirmation internally
+6. final result
+   - return one short human-readable result
+   - if production replace succeeded with cleanup warnings, say it briefly in human language
+   - preferred wording:
+     - "Готово. Новая структура кампании добавлена. Часть старых объявлений или групп Яндекс.Директ не дал удалить."
+
+Additional rules for this orchestration:
+- do not use `revise_campaign_draft`
+- do not patch old live ads or ad groups as the main path
+- do not show intermediate backend progress messages
+- do not require the user to type technical flags
+- if the user asked only to build the new campaign but not yet apply it, stop after the short preview and wait for the next instruction
+
+### Intent: CAMPAIGN_ENRICHMENT
+
+If the user asks to improve an existing campaign with UTM, sitelinks, or negative keywords, set:
+- `intent = CAMPAIGN_ENRICHMENT`
+
+Trigger examples and close variants:
+- "доработай кампанию"
+- "добавь utm, быстрые ссылки и минус-слова"
+- "оптимизируй кампанию"
+- "добавь utm и быстрые ссылки"
+- "добавь минус-фразы и быстрые ссылки"
+
+Priority and routing rule:
+- if `campaign_id` is present, treat it as the target production campaign
+- do NOT switch to `NEW_CAMPAIGN_REBUILD` just because the message asks for improvements
+- do NOT build a new campaign from scratch for this intent
+- use the direct enrichment preview/apply routes as the primary path
+- do NOT invent support for interests and habits, WordStat, or competitor analysis when the current backend does not confirm them
+
+### End-to-End Campaign Enrichment Orchestration
+
+For `CAMPAIGN_ENRICHMENT`, prefer one unified Telegram execution flow:
+
+1. enrichment preview
+   - call the direct enrichment preview route
+   - prepare a thematic tracking template
+   - prepare 4 safe sitelinks on `artfarfor.com`
+   - prepare campaign-level negative keywords
+   - prepare group-level negative keywords when they are confirmed by the current backend
+2. short preview
+   - return one short human-readable preview
+   - include only the business result:
+     - UTM/tracking template
+     - 4 sitelinks
+     - 4 callouts
+     - campaign negative keywords
+     - group-level negative keywords
+   - if some capabilities are not confirmed by the current backend, say that briefly in human language
+   - do not show JSON, route names, curl, raw fragments, or internal steps
+3. production confirmation
+   - ask one short confirmation question
+   - preferred wording:
+     - "Применить UTM, быстрые ссылки и минус-фразы к кампании 708428061?"
+   - do not mention route names or `confirm=true`
+4. production apply
+   - after a clear human confirmation such as "Да" or "Подтверждаю":
+     - call the direct enrichment apply route
+     - pass technical confirmation internally
+5. final result
+   - return one short human-readable result
+   - preferred wording:
+     - "Готово. UTM добавил, быстрые ссылки создал, уточнения и минус-фразы применил."
+   - if the backend clearly confirms unsupported items, say it briefly in human language instead of inventing support
 
 ## Workspace Isolation
 

@@ -15,7 +15,7 @@
   "session_mode": "review_draft",
   "draft_campaign": {
     "campaign_type": "UNIFIED_CAMPAIGN",
-    "campaign_name": "Royal Doulton | Approved",
+    "campaign_name": "Клоуны | Approved",
     "site_url": "https://artfarfor.com",
     "region": "RU",
     "language": "RU",
@@ -44,7 +44,7 @@
     ],
     "ad_groups": [
       {
-        "group_name": "Статуэтки Royal Doulton в подарок",
+        "group_name": "Клоуны",
         "negative_keywords": [],
         "autotargeting_settings": {
           "Categories": {
@@ -62,28 +62,288 @@
         },
         "ads": [
           {
-            "title": "Royal Doulton | ArtFarfor",
-            "text": "Статуэтки Royal Doulton — красивый подарок и коллекционный английский фарфор.",
+            "title": "Клоуны | ArtFarfor",
+            "text": "Клоуны из фарфора для интерьера, коллекции и подарка.",
             "final_url": "https://artfarfor.com",
-            "ad_image_hash": null,
-            "creative_spec": null,
-            "ad_image_hashes": []
+            "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+            "ad_image_hashes": [
+              "RxYJxGSusxMlWHl6TsybFQ",
+              "I2eoI3vPqkEHA3W5c1dZUw"
+            ],
+            "creative_spec": null
+          },
+          {
+            "title": "Клоуны | ArtFarfor",
+            "text": "Клоуны ручной работы для дома, витрины и коллекции.",
+            "final_url": "https://artfarfor.com",
+            "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+            "ad_image_hashes": [
+              "RxYJxGSusxMlWHl6TsybFQ",
+              "I2eoI3vPqkEHA3W5c1dZUw"
+            ],
+            "creative_spec": null
+          },
+          {
+            "title": "Клоуны | ArtFarfor",
+            "text": "Клоуны для подарка и декора с доставкой по России.",
+            "final_url": "https://artfarfor.com",
+            "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+            "ad_image_hashes": [
+              "RxYJxGSusxMlWHl6TsybFQ",
+              "I2eoI3vPqkEHA3W5c1dZUw"
+            ],
+            "creative_spec": null
+          },
+          {
+            "title": "Клоуны | ArtFarfor",
+            "text": "Клоуны для ценителей авторского и коллекционного фарфора.",
+            "final_url": "https://artfarfor.com",
+            "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+            "ad_image_hashes": [
+              "RxYJxGSusxMlWHl6TsybFQ",
+              "I2eoI3vPqkEHA3W5c1dZUw"
+            ],
+            "creative_spec": null
+          }
+        ]
+      },
+      {
+        "group_name": "Клоуны в подарок",
+        "negative_keywords": [],
+        "autotargeting_settings": {
+          "Categories": {
+            "Exact": "YES",
+            "Narrow": "YES",
+            "Alternative": "YES",
+            "Accessory": "YES",
+            "Broader": "YES"
+          },
+          "BrandOptions": {
+            "WithoutBrands": "YES",
+            "WithAdvertiserBrand": "YES",
+            "WithCompetitorsBrand": "NO"
+          }
+        },
+        "ads": [
+          {
+            "title": "Клоуны в подарок | ArtFarfor",
+            "text": "Клоуны в подарок из фарфора для интерьера, коллекции и подарка.",
+            "final_url": "https://artfarfor.com",
+            "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+            "ad_image_hashes": [
+              "RxYJxGSusxMlWHl6TsybFQ",
+              "I2eoI3vPqkEHA3W5c1dZUw"
+            ],
+            "creative_spec": null
+          },
+          {
+            "title": "Клоуны в подарок | ArtFarfor",
+            "text": "Клоуны в подарок ручной работы для дома, витрины и коллекции.",
+            "final_url": "https://artfarfor.com",
+            "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+            "ad_image_hashes": [
+              "RxYJxGSusxMlWHl6TsybFQ",
+              "I2eoI3vPqkEHA3W5c1dZUw"
+            ],
+            "creative_spec": null
+          },
+          {
+            "title": "Клоуны в подарок | ArtFarfor",
+            "text": "Клоуны для подарка и декора с доставкой по России.",
+            "final_url": "https://artfarfor.com",
+            "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+            "ad_image_hashes": [
+              "RxYJxGSusxMlWHl6TsybFQ",
+              "I2eoI3vPqkEHA3W5c1dZUw"
+            ],
+            "creative_spec": null
+          },
+          {
+            "title": "Клоуны в подарок | ArtFarfor",
+            "text": "Клоуны для ценителей авторского и коллекционного фарфора.",
+            "final_url": "https://artfarfor.com",
+            "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+            "ad_image_hashes": [
+              "RxYJxGSusxMlWHl6TsybFQ",
+              "I2eoI3vPqkEHA3W5c1dZUw"
+            ],
+            "creative_spec": null
+          }
+        ]
+      },
+      {
+        "group_name": "Клоуны для интерьера",
+        "negative_keywords": [],
+        "autotargeting_settings": {
+          "Categories": {
+            "Exact": "YES",
+            "Narrow": "YES",
+            "Alternative": "YES",
+            "Accessory": "YES",
+            "Broader": "YES"
+          },
+          "BrandOptions": {
+            "WithoutBrands": "YES",
+            "WithAdvertiserBrand": "YES",
+            "WithCompetitorsBrand": "NO"
+          }
+        },
+        "ads": [
+          {
+            "title": "Клоуны для интерьера | ArtFarfor",
+            "text": "Клоуны для интерьера из фарфора для интерьера, коллекции и подарка.",
+            "final_url": "https://artfarfor.com",
+            "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+            "ad_image_hashes": [
+              "RxYJxGSusxMlWHl6TsybFQ",
+              "I2eoI3vPqkEHA3W5c1dZUw"
+            ],
+            "creative_spec": null
+          },
+          {
+            "title": "Клоуны для интерьера | ArtFarfor",
+            "text": "Клоуны для интерьера ручной работы для дома, витрины и коллекции.",
+            "final_url": "https://artfarfor.com",
+            "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+            "ad_image_hashes": [
+              "RxYJxGSusxMlWHl6TsybFQ",
+              "I2eoI3vPqkEHA3W5c1dZUw"
+            ],
+            "creative_spec": null
+          },
+          {
+            "title": "Клоуны для интерьера | ArtFarfor",
+            "text": "Клоуны для подарка и декора с доставкой по России.",
+            "final_url": "https://artfarfor.com",
+            "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+            "ad_image_hashes": [
+              "RxYJxGSusxMlWHl6TsybFQ",
+              "I2eoI3vPqkEHA3W5c1dZUw"
+            ],
+            "creative_spec": null
+          },
+          {
+            "title": "Клоуны для интерьера | ArtFarfor",
+            "text": "Клоуны для ценителей авторского и коллекционного фарфора.",
+            "final_url": "https://artfarfor.com",
+            "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+            "ad_image_hashes": [
+              "RxYJxGSusxMlWHl6TsybFQ",
+              "I2eoI3vPqkEHA3W5c1dZUw"
+            ],
+            "creative_spec": null
+          }
+        ]
+      },
+      {
+        "group_name": "Клоуны для коллекции",
+        "negative_keywords": [],
+        "autotargeting_settings": {
+          "Categories": {
+            "Exact": "YES",
+            "Narrow": "YES",
+            "Alternative": "YES",
+            "Accessory": "YES",
+            "Broader": "YES"
+          },
+          "BrandOptions": {
+            "WithoutBrands": "YES",
+            "WithAdvertiserBrand": "YES",
+            "WithCompetitorsBrand": "NO"
+          }
+        },
+        "ads": [
+          {
+            "title": "Клоуны для коллекции | ArtFarfor",
+            "text": "Клоуны для коллекции из фарфора для интерьера, коллекции и подарка.",
+            "final_url": "https://artfarfor.com",
+            "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+            "ad_image_hashes": [
+              "RxYJxGSusxMlWHl6TsybFQ",
+              "I2eoI3vPqkEHA3W5c1dZUw"
+            ],
+            "creative_spec": null
+          },
+          {
+            "title": "Клоуны для коллекции | ArtFarfor",
+            "text": "Клоуны для коллекции ручной работы для дома, витрины и коллекции.",
+            "final_url": "https://artfarfor.com",
+            "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+            "ad_image_hashes": [
+              "RxYJxGSusxMlWHl6TsybFQ",
+              "I2eoI3vPqkEHA3W5c1dZUw"
+            ],
+            "creative_spec": null
+          },
+          {
+            "title": "Клоуны для коллекции | ArtFarfor",
+            "text": "Клоуны для подарка и декора с доставкой по России.",
+            "final_url": "https://artfarfor.com",
+            "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+            "ad_image_hashes": [
+              "RxYJxGSusxMlWHl6TsybFQ",
+              "I2eoI3vPqkEHA3W5c1dZUw"
+            ],
+            "creative_spec": null
+          },
+          {
+            "title": "Клоуны для коллекции | ArtFarfor",
+            "text": "Клоуны для ценителей авторского и коллекционного фарфора.",
+            "final_url": "https://artfarfor.com",
+            "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+            "ad_image_hashes": [
+              "RxYJxGSusxMlWHl6TsybFQ",
+              "I2eoI3vPqkEHA3W5c1dZUw"
+            ],
+            "creative_spec": null
           }
         ]
       }
     ],
     "ads": [
       {
-        "title": "Royal Doulton | ArtFarfor",
-        "text": "Royal Doulton — коллекционная статуэтка и подарок из английского фарфора.",
+        "title": "Клоуны | ArtFarfor",
+        "text": "Клоуны из фарфора для интерьера, коллекции и подарка.",
         "final_url": "https://artfarfor.com",
-        "ad_image_hash": "A3xEP1DlR40pUpIg9F5mYg",
-        "creative_spec": null,
+        "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
         "ad_image_hashes": [
-          "A3xEP1DlR40pUpIg9F5mYg",
-          "8I8g30Soojev2uJ5yhAv4A",
-          "MAXDUmRpCDp93BtHPPJJuQ"
-        ]
+          "RxYJxGSusxMlWHl6TsybFQ",
+          "I2eoI3vPqkEHA3W5c1dZUw"
+        ],
+        "creative_spec": null
+      },
+      {
+        "title": "Клоуны в подарок | ArtFarfor",
+        "text": "Клоуны в подарок ручной работы для дома, витрины и коллекции.",
+        "final_url": "https://artfarfor.com",
+        "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+        "ad_image_hashes": [
+          "RxYJxGSusxMlWHl6TsybFQ",
+          "I2eoI3vPqkEHA3W5c1dZUw"
+        ],
+        "creative_spec": null
+      },
+      {
+        "title": "Клоуны для интерьера | ArtFarfor",
+        "text": "Клоуны для подарка и декора с доставкой по России.",
+        "final_url": "https://artfarfor.com",
+        "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+        "ad_image_hashes": [
+          "RxYJxGSusxMlWHl6TsybFQ",
+          "I2eoI3vPqkEHA3W5c1dZUw"
+        ],
+        "creative_spec": null
+      },
+      {
+        "title": "Клоуны для коллекции | ArtFarfor",
+        "text": "Клоуны для ценителей авторского и коллекционного фарфора.",
+        "final_url": "https://artfarfor.com",
+        "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+        "ad_image_hashes": [
+          "RxYJxGSusxMlWHl6TsybFQ",
+          "I2eoI3vPqkEHA3W5c1dZUw"
+        ],
+        "creative_spec": null
       }
     ],
     "autotargeting_settings": {
@@ -202,43 +462,335 @@
       "theme": "Royal Doulton",
       "page_url": "https://artfarfor.com/product/statuetka-farfor-tkach-snov-royal-doulton-angliya",
       "image_url": "https://static.insales-cdn.com/images/products/1/2497/2694662593/250126-03-O.jpg"
+    },
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ"
+    },
+    {
+      "type": "image",
+      "source": "artfarfor_site",
+      "theme": "Клоуны",
+      "page_url": "https://artfarfor.com/collection/klouy-arlekiny-komedianty",
+      "image_url": "https://static.insales-cdn.com/images/collections/1/5446/93631814/071124-03-O.jpg"
+    },
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "I2eoI3vPqkEHA3W5c1dZUw"
+    },
+    {
+      "type": "image",
+      "source": "artfarfor_site",
+      "theme": "Клоуны",
+      "page_url": "https://artfarfor.com/product/statuetka-farfor-spokoynoy-nochi-mama-i-dochka-lladro-ispaniya",
+      "image_url": "https://static.insales-cdn.com/images/products/1/8169/2941501417/060426-01-M.jpg"
+    },
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "IHO-f9Il7KKnPDIq6v1Nng"
+    },
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "Sstnne4bDKFjN1sZDITNCw"
+    },
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "tgKMhP_QnxLNHpgx-uK52w"
+    },
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "fw6muuCx9gnTqxCHJlNjBg"
     }
   ],
   "draft_media": [
     {
       "type": "image",
       "scope": "campaign",
-      "ad_image_hash": "MAXDUmRpCDp93BtHPPJJuQ",
+      "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
       "ad_index": 0
     },
     {
       "type": "image",
       "scope": "campaign",
-      "ad_image_hash": "probe",
+      "ad_image_hash": "I2eoI3vPqkEHA3W5c1dZUw",
       "ad_index": 0
     },
     {
       "type": "image",
       "scope": "campaign",
-      "ad_image_hash": "A3xEP1DlR40pUpIg9F5mYg",
-      "ad_index": 0
+      "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+      "ad_index": 1
     },
     {
       "type": "image",
       "scope": "campaign",
-      "ad_image_hash": "8I8g30Soojev2uJ5yhAv4A",
+      "ad_image_hash": "I2eoI3vPqkEHA3W5c1dZUw",
+      "ad_index": 1
+    },
+    {
+      "type": "image",
+      "scope": "campaign",
+      "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+      "ad_index": 2
+    },
+    {
+      "type": "image",
+      "scope": "campaign",
+      "ad_image_hash": "I2eoI3vPqkEHA3W5c1dZUw",
+      "ad_index": 2
+    },
+    {
+      "type": "image",
+      "scope": "campaign",
+      "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+      "ad_index": 3
+    },
+    {
+      "type": "image",
+      "scope": "campaign",
+      "ad_image_hash": "I2eoI3vPqkEHA3W5c1dZUw",
+      "ad_index": 3
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+      "ad_group_index": 0,
       "ad_index": 0
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "I2eoI3vPqkEHA3W5c1dZUw",
+      "ad_group_index": 0,
+      "ad_index": 0
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+      "ad_group_index": 0,
+      "ad_index": 1
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "I2eoI3vPqkEHA3W5c1dZUw",
+      "ad_group_index": 0,
+      "ad_index": 1
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+      "ad_group_index": 0,
+      "ad_index": 2
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "I2eoI3vPqkEHA3W5c1dZUw",
+      "ad_group_index": 0,
+      "ad_index": 2
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+      "ad_group_index": 0,
+      "ad_index": 3
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "I2eoI3vPqkEHA3W5c1dZUw",
+      "ad_group_index": 0,
+      "ad_index": 3
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+      "ad_group_index": 1,
+      "ad_index": 0
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "I2eoI3vPqkEHA3W5c1dZUw",
+      "ad_group_index": 1,
+      "ad_index": 0
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+      "ad_group_index": 1,
+      "ad_index": 1
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "I2eoI3vPqkEHA3W5c1dZUw",
+      "ad_group_index": 1,
+      "ad_index": 1
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+      "ad_group_index": 1,
+      "ad_index": 2
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "I2eoI3vPqkEHA3W5c1dZUw",
+      "ad_group_index": 1,
+      "ad_index": 2
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+      "ad_group_index": 1,
+      "ad_index": 3
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "I2eoI3vPqkEHA3W5c1dZUw",
+      "ad_group_index": 1,
+      "ad_index": 3
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+      "ad_group_index": 2,
+      "ad_index": 0
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "I2eoI3vPqkEHA3W5c1dZUw",
+      "ad_group_index": 2,
+      "ad_index": 0
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+      "ad_group_index": 2,
+      "ad_index": 1
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "I2eoI3vPqkEHA3W5c1dZUw",
+      "ad_group_index": 2,
+      "ad_index": 1
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+      "ad_group_index": 2,
+      "ad_index": 2
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "I2eoI3vPqkEHA3W5c1dZUw",
+      "ad_group_index": 2,
+      "ad_index": 2
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+      "ad_group_index": 2,
+      "ad_index": 3
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "I2eoI3vPqkEHA3W5c1dZUw",
+      "ad_group_index": 2,
+      "ad_index": 3
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+      "ad_group_index": 3,
+      "ad_index": 0
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "I2eoI3vPqkEHA3W5c1dZUw",
+      "ad_group_index": 3,
+      "ad_index": 0
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+      "ad_group_index": 3,
+      "ad_index": 1
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "I2eoI3vPqkEHA3W5c1dZUw",
+      "ad_group_index": 3,
+      "ad_index": 1
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+      "ad_group_index": 3,
+      "ad_index": 2
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "I2eoI3vPqkEHA3W5c1dZUw",
+      "ad_group_index": 3,
+      "ad_index": 2
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "RxYJxGSusxMlWHl6TsybFQ",
+      "ad_group_index": 3,
+      "ad_index": 3
+    },
+    {
+      "type": "image",
+      "scope": "ad_group",
+      "ad_image_hash": "I2eoI3vPqkEHA3W5c1dZUw",
+      "ad_group_index": 3,
+      "ad_index": 3
     }
   ],
-  "last_uploaded_image_hash": "A3xEP1DlR40pUpIg9F5mYg",
+  "last_uploaded_image_hash": "fw6muuCx9gnTqxCHJlNjBg",
   "creative_spec": null,
   "render_task": null,
   "render_result_url": null,
   "draft_meta": {
     "version": "v1",
-    "last_action": "apply_site_image_to_draft_ad",
-    "theme": "Royal Doulton",
-    "revision_count": 12,
+    "last_action": "upload_ad_image",
+    "theme": "Клоуны",
+    "revision_count": 0,
     "supported_revision_rules": [
       "измени название кампании на X",
       "добавь группу X",

@@ -554,6 +554,7 @@ class YandexDirectClient:
                     "Name",
                     "CampaignId",
                     "RegionIds",
+                    "NegativeKeywords",
                     "Status",
                     "ServingStatus",
                     "Type",
@@ -643,6 +644,7 @@ class YandexDirectClient:
                     "AdImageHash",
                     "AdImageModeration",
                     "SitelinkSetId",
+                    "AdExtensions",
                 ],
             },
         )
@@ -662,9 +664,31 @@ class YandexDirectClient:
                     "Name",
                     "CampaignId",
                     "RegionIds",
+                    "NegativeKeywords",
                     "Status",
                     "ServingStatus",
                     "Type",
+                ],
+            },
+        )
+        return response.body
+
+    def update_ad_group_negative_keywords(
+        self,
+        ad_group_id: int,
+        negative_keywords: List[str],
+    ) -> Dict[str, Any]:
+        response = self.call_v501(
+            service="adgroups",
+            method="update",
+            params={
+                "AdGroups": [
+                    {
+                        "Id": ad_group_id,
+                        "NegativeKeywords": {
+                            "Items": negative_keywords,
+                        },
+                    }
                 ],
             },
         )
@@ -695,6 +719,57 @@ class YandexDirectClient:
                     "AdImageHash",
                     "AdImageModeration",
                     "SitelinkSetId",
+                    "AdExtensions",
+                ],
+            },
+        )
+        return response.body
+
+    def get_callouts(
+        self,
+        ids: Optional[List[int]] = None,
+    ) -> Dict[str, Any]:
+        selection_criteria: Dict[str, Any] = {
+            "Types": ["CALLOUT"],
+        }
+        if ids:
+            selection_criteria["Ids"] = ids
+
+        response = self.call_v501(
+            service="adextensions",
+            method="get",
+            params={
+                "SelectionCriteria": selection_criteria,
+                "FieldNames": [
+                    "Id",
+                    "Type",
+                    "Status",
+                    "StatusClarification",
+                    "Associated",
+                    "State",
+                ],
+                "CalloutFieldNames": [
+                    "CalloutText",
+                ],
+            },
+        )
+        return response.body
+
+    def add_callouts(
+        self,
+        callout_texts: List[str],
+    ) -> Dict[str, Any]:
+        response = self.call_v501(
+            service="adextensions",
+            method="add",
+            params={
+                "AdExtensions": [
+                    {
+                        "Callout": {
+                            "CalloutText": callout_text,
+                        }
+                    }
+                    for callout_text in callout_texts
                 ],
             },
         )
@@ -1139,6 +1214,56 @@ class YandexDirectClient:
                         "Id": ad_id,
                         "TextAd": {
                             "AdImageHash": None if remove else ad_image_hash,
+                        },
+                    }
+                ],
+            },
+        )
+        return response.body
+
+    def update_text_ad_sitelink_set_id(
+        self,
+        ad_id: int,
+        sitelink_set_id: int,
+    ) -> Dict[str, Any]:
+        response = self.call_v501(
+            service="ads",
+            method="update",
+            params={
+                "Ads": [
+                    {
+                        "Id": ad_id,
+                        "TextAd": {
+                            "SitelinkSetId": sitelink_set_id,
+                        },
+                    }
+                ],
+            },
+        )
+        return response.body
+
+    def set_text_ad_callout_ids(
+        self,
+        ad_id: int,
+        ad_extension_ids: List[int],
+    ) -> Dict[str, Any]:
+        response = self.call_v501(
+            service="ads",
+            method="update",
+            params={
+                "Ads": [
+                    {
+                        "Id": ad_id,
+                        "TextAd": {
+                            "CalloutSetting": {
+                                "AdExtensions": [
+                                    {
+                                        "AdExtensionId": ad_extension_id,
+                                        "Operation": "SET",
+                                    }
+                                    for ad_extension_id in ad_extension_ids
+                                ],
+                            },
                         },
                     }
                 ],

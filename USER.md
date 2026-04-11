@@ -30,6 +30,8 @@ There is an existing separate project (Kwork):
 - prefers practical solutions over abstract ideas
 - in Telegram wants only short final results without debug JSON
 - wants confirmation in normal human language, not via technical flags like `confirm=true`
+- for a new campaign from scratch, expects one end-to-end flow: rebuild draft, add images, preview briefly, ask one confirmation, then apply to production
+- for an existing campaign, expects one end-to-end enrichment flow: preview briefly, ask one confirmation, then apply UTM, sitelinks, callouts, campaign negative keywords, and group-level negative keywords to production
 
 ## Working Style
 
