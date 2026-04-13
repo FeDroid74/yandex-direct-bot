@@ -1,0 +1,6 @@
+.venv/
+.openclaw/
+**/__pycache__/
+*.pyc
+*.swp
+backend/.env

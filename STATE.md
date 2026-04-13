@@ -506,6 +506,46 @@
       "type": "image",
       "source": "yandex_direct_upload",
       "ad_image_hash": "fw6muuCx9gnTqxCHJlNjBg"
+    },
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "mlhdXdaKib9OQGDbCcl91w"
+    },
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "8nmWYjvsFt5SSfA3YYnUUw"
+    },
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "DpQJ67f8G_Ft45wE8i_ueQ"
+    },
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "YWcpnYbO0iHZ38LuUnWhjg"
+    },
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "1Mu74PCHpTIHFKVOUrzo4g"
+    },
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "HRQBcQpxtcHHJbX_-K-IrA"
+    },
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "OvgE0YVyJpyNtgu4x4JDmw"
+    },
+    {
+      "type": "image",
+      "source": "yandex_direct_upload",
+      "ad_image_hash": "IB3ykYSU_kla8XM6p_4agQ"
     }
   ],
   "draft_media": [
@@ -782,7 +822,7 @@
       "ad_index": 3
     }
   ],
-  "last_uploaded_image_hash": "fw6muuCx9gnTqxCHJlNjBg",
+  "last_uploaded_image_hash": "IB3ykYSU_kla8XM6p_4agQ",
   "creative_spec": null,
   "render_task": null,
   "render_result_url": null,
