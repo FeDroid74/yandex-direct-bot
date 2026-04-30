@@ -345,6 +345,93 @@ class YandexDirectClient:
         except urllib.error.URLError as e:
             raise YandexDirectClientError(f"Connection error: {e.reason}") from e
 
+
+    def get_search_terms_report(
+        self,
+        campaign_id: int,
+        date_from: str,
+        date_to: str,
+    ) -> Dict[str, Any]:
+        payload = {
+            "params": {
+                "SelectionCriteria": {
+                    "DateFrom": date_from,
+                    "DateTo": date_to,
+                    "Filter": [
+                        {
+                            "Field": "CampaignId",
+                            "Operator": "IN",
+                            "Values": [str(campaign_id)],
+                        }
+                    ],
+                },
+                "FieldNames": [
+                    "Date",
+                    "CampaignId",
+                    "AdGroupId",
+                    "Query",
+                    "Criteria",
+                    "CriteriaType",
+                    "Impressions",
+                    "Clicks",
+                    "Cost",
+                    "AvgCpc",
+                    "Conversions",
+                ],
+                "ReportName": f"search-terms-{campaign_id}-{date_from}-{date_to}",
+                "ReportType": "SEARCH_QUERY_PERFORMANCE_REPORT",
+                "DateRangeType": "CUSTOM_DATE",
+                "Format": "TSV",
+                "IncludeVAT": "YES",
+                "IncludeDiscount": "YES",
+            }
+        }
+
+        request = urllib.request.Request(
+            url=self._build_reports_url(),
+            data=json.dumps(payload).encode("utf-8"),
+            headers=self._build_reports_headers(),
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                status_code = response.getcode()
+                raw_tsv = response.read().decode("utf-8")
+
+                result: Dict[str, Any] = {
+                    "status_code": status_code,
+                    "request_id": response.headers.get("RequestId", ""),
+                    "units": response.headers.get("Units", ""),
+                    "retry_in": response.headers.get("retryIn", ""),
+                }
+
+                if status_code in (201, 202):
+                    result["report_status"] = "processing"
+                    result["rows"] = []
+                    return result
+
+                rows = list(csv.DictReader(io.StringIO(raw_tsv), delimiter="	"))
+
+                result["report_status"] = "ready"
+                result["rows"] = rows
+                result["raw_tsv"] = raw_tsv
+                return result
+
+        except urllib.error.HTTPError as e:
+            raw_error = e.read().decode("utf-8", errors="replace")
+            try:
+                parsed_error = json.loads(raw_error) if raw_error else {}
+            except json.JSONDecodeError:
+                parsed_error = {"raw_error": raw_error}
+
+            raise YandexDirectClientError(
+                f"HTTP {e.code}: {json.dumps(parsed_error, ensure_ascii=False)}"
+            ) from e
+
+        except urllib.error.URLError as e:
+            raise YandexDirectClientError(f"Connection error: {e.reason}") from e
+
     def ping(self) -> Dict[str, Any]:
         return {
             "configured": bool(self.oauth_token.strip()),

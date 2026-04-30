@@ -3665,6 +3665,138 @@ def build_campaign_stats_response(campaign_id: int, raw_date_from=None, raw_date
     )
 
 
+
+def build_search_terms_summary(rows: list[dict], processing: bool = False) -> str:
+    if processing:
+        return "Отчёт по реальным поисковым запросам ещё формируется."
+
+    aggregated: dict[str, dict] = {}
+    for row in rows:
+        query = normalize_non_empty_string(row.get("query")) or "Без поискового запроса"
+        item = aggregated.setdefault(
+            query,
+            {
+                "query": query,
+                "impressions": 0.0,
+                "clicks": 0.0,
+                "cost": 0.0,
+                "conversions": 0.0,
+            },
+        )
+        item["impressions"] += safe_float(row.get("impressions"))
+        item["clicks"] += safe_float(row.get("clicks"))
+        item["cost"] += safe_float(row.get("cost"))
+        item["conversions"] += safe_float(row.get("conversions"))
+
+    if not aggregated:
+        return "По кампании не найдено реальных поисковых запросов за выбранный период."
+
+    query_items = list(aggregated.values())
+    top_clicks = sorted(query_items, key=lambda item: (item["clicks"], item["cost"]), reverse=True)[:3]
+    top_cost = sorted(query_items, key=lambda item: (item["cost"], item["clicks"]), reverse=True)[:3]
+    without_conversions = [item for item in query_items if item["clicks"] > 0 and item["conversions"] <= 0]
+
+    top_clicks_text = ", ".join(
+        f'{item["query"]} (клики: {format_rub_value(item["clicks"])})'
+        for item in top_clicks
+    ) or "нет данных"
+    top_cost_text = ", ".join(
+        f'{item["query"]} ({round(item["cost"], 2)})'
+        for item in top_cost
+    ) or "нет данных"
+
+    if without_conversions:
+        conversions_text = f"Запросов без конверсий: {format_rub_value(len(without_conversions))}."
+    else:
+        conversions_text = "Запросов без конверсий не найдено."
+
+    return (
+        f"Найдено {format_rub_value(len(query_items))} поисковых запросов. "
+        f"Топ по кликам: {top_clicks_text}. "
+        f"Топ по расходу: {top_cost_text}. "
+        f"{conversions_text}"
+    )
+
+
+def build_search_terms_response(campaign_id: int, raw_date_from=None, raw_date_to=None):
+    normalized_date_from = normalize_iso_date(raw_date_from) if raw_date_from is not None else None
+    normalized_date_to = normalize_iso_date(raw_date_to) if raw_date_to is not None else None
+
+    if raw_date_from is not None and normalized_date_from is None:
+        return {"status": "error", "message": "date_from must be in YYYY-MM-DD format"}, 400
+
+    if raw_date_to is not None and normalized_date_to is None:
+        return {"status": "error", "message": "date_to must be in YYYY-MM-DD format"}, 400
+
+    date_from = normalized_date_from or (date.today() - timedelta(days=6)).isoformat()
+    date_to = normalized_date_to or date.today().isoformat()
+
+    if date_from > date_to:
+        return {"status": "error", "message": "date_from must be <= date_to"}, 400
+
+    client = YandexDirectClient.for_target("production")
+
+    try:
+        report = client.get_search_terms_report(
+            campaign_id=campaign_id,
+            date_from=date_from,
+            date_to=date_to,
+        )
+    except YandexDirectClientError as e:
+        return (
+            {"status": "error", "message": str(e), "target": "production", "campaign_id": str(campaign_id)},
+            502,
+        )
+
+    if report["report_status"] == "processing":
+        return (
+            {
+                "status": "processing",
+                "campaign_id": str(campaign_id),
+                "request_id": report["request_id"],
+                "retry_in": report["retry_in"],
+                "summary": build_search_terms_summary([], processing=True),
+            },
+            report["status_code"],
+        )
+
+    rows: list[dict] = []
+    for raw_row in report.get("rows", []):
+        if not isinstance(raw_row, dict):
+            continue
+        normalized_campaign_id = normalize_positive_int_id(raw_row.get("CampaignId")) or campaign_id
+        normalized_ad_group_id = normalize_positive_int_id(raw_row.get("AdGroupId"))
+        rows.append(
+            {
+                "date": normalize_non_empty_string(raw_row.get("Date")) or "",
+                "campaign_id": str(normalized_campaign_id),
+                "ad_group_id": str(normalized_ad_group_id) if normalized_ad_group_id is not None else "",
+                "query": normalize_non_empty_string(raw_row.get("Query")) or "",
+                "criteria": normalize_non_empty_string(raw_row.get("Criteria")) or "",
+                "criteria_type": normalize_non_empty_string(raw_row.get("CriteriaType")) or "",
+                "impressions": str(raw_row.get("Impressions", "")),
+                "clicks": str(raw_row.get("Clicks", "")),
+                "cost": str(raw_row.get("Cost", "")),
+                "avg_cpc": str(raw_row.get("AvgCpc", "")),
+                "conversions": str(raw_row.get("Conversions", "")),
+            }
+        )
+
+    return (
+        {
+            "status": "success",
+            "campaign_id": str(campaign_id),
+            "date_from": date_from,
+            "date_to": date_to,
+            "rows": rows,
+            "summary": build_search_terms_summary(rows),
+            "request_id": report["request_id"],
+            "units": report["units"],
+        },
+        200,
+    )
+
+
 def build_campaign_analysis_response(stats_payload: dict, focus: Optional[str] = None) -> dict:
     campaign_id = stats_payload.get("campaign_id")
     date_from = stats_payload.get("date_from")
@@ -4596,6 +4728,34 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             payload, status_code = build_campaign_stats_response(
+                campaign_id=campaign_id,
+                raw_date_from=data.get("date_from"),
+                raw_date_to=data.get("date_to"),
+            )
+            self._send_json(payload, status_code)
+            return
+
+
+        if self.path == "/get_search_terms":
+            raw_target = data.get("target", "production")
+            target = raw_target.strip().lower() if isinstance(raw_target, str) else ""
+
+            if target != "production":
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": "Reports API search terms are enabled only for production; sandbox support is not confirmed",
+                    },
+                    400,
+                )
+                return
+
+            campaign_id = normalize_campaign_id(data.get("campaign_id"))
+            if campaign_id is None:
+                self._send_json({"status": "error", "message": "campaign_id must be a positive integer or numeric string"}, 400)
+                return
+
+            payload, status_code = build_search_terms_response(
                 campaign_id=campaign_id,
                 raw_date_from=data.get("date_from"),
                 raw_date_to=data.get("date_to"),
