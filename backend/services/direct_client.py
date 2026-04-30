@@ -1079,6 +1079,31 @@ class YandexDirectClient:
         )
         return response.body
 
+
+    def update_negative_keyword_shared_set(
+        self,
+        shared_set_id: int,
+        *,
+        name: Optional[str] = None,
+        negative_keywords: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        item: Dict[str, Any] = {
+            "Id": shared_set_id,
+        }
+        if name is not None:
+            item["Name"] = name
+        if negative_keywords is not None:
+            item["NegativeKeywords"] = negative_keywords
+
+        response = self.call_v501(
+            service="negativekeywordsharedsets",
+            method="update",
+            params={
+                "NegativeKeywordSharedSets": [item],
+            },
+        )
+        return response.body
+
     def suspend_ads(self, ad_ids: List[int]) -> Dict[str, Any]:
         response = self.call_v501(
             service="ads",
