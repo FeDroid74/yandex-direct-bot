@@ -16,6 +16,7 @@ from typing import List, Optional
 from config import settings
 from services.direct_client import YandexDirectClient, YandexDirectClientError
 from services.direct_mock import validate_campaign
+from services.search_terms_analyzer import analyze_search_terms
 
 
 ALLOWED_TARGETS = {"sandbox", "production"}
@@ -3666,7 +3667,7 @@ def build_campaign_stats_response(campaign_id: int, raw_date_from=None, raw_date
 
 
 
-def build_search_terms_summary(rows: list[dict], processing: bool = False) -> str:
+def build_search_terms_summary(rows: list[dict], processing: bool = False, analysis: Optional[dict] = None) -> str:
     if processing:
         return "Отчёт по реальным поисковым запросам ещё формируется."
 
@@ -3710,15 +3711,32 @@ def build_search_terms_summary(rows: list[dict], processing: bool = False) -> st
     else:
         conversions_text = "Запросов без конверсий не найдено."
 
-    return (
+    summary = (
         f"Найдено {format_rub_value(len(query_items))} поисковых запросов. "
         f"Топ по кликам: {top_clicks_text}. "
         f"Топ по расходу: {top_cost_text}. "
         f"{conversions_text}"
     )
 
+    if analysis is None:
+        return summary
 
-def build_search_terms_response(campaign_id: int, raw_date_from=None, raw_date_to=None):
+    negative_count = len(analysis.get("candidates_negative", []))
+    waste_count = len(analysis.get("waste_queries", []))
+    if negative_count > 0:
+        negative_text = f"Есть {format_rub_value(negative_count)} кандидатов в минус-фразы."
+    else:
+        negative_text = "Явных кандидатов в минус-фразы пока нет."
+
+    return (
+        f"{summary} "
+        f"Плохих запросов: {format_rub_value(negative_count)}. "
+        f"С расходом без результата: {format_rub_value(waste_count)}. "
+        f"{negative_text}"
+    )
+
+
+def build_search_terms_response(campaign_id: int, raw_date_from=None, raw_date_to=None, analyze: bool = False):
     normalized_date_from = normalize_iso_date(raw_date_from) if raw_date_from is not None else None
     normalized_date_to = normalize_iso_date(raw_date_to) if raw_date_to is not None else None
 
@@ -3782,19 +3800,24 @@ def build_search_terms_response(campaign_id: int, raw_date_from=None, raw_date_t
             }
         )
 
-    return (
-        {
-            "status": "success",
-            "campaign_id": str(campaign_id),
-            "date_from": date_from,
-            "date_to": date_to,
-            "rows": rows,
-            "summary": build_search_terms_summary(rows),
-            "request_id": report["request_id"],
-            "units": report["units"],
-        },
-        200,
-    )
+    payload = {
+        "status": "success",
+        "campaign_id": str(campaign_id),
+        "date_from": date_from,
+        "date_to": date_to,
+        "rows": rows,
+        "request_id": report["request_id"],
+        "units": report["units"],
+    }
+
+    if analyze:
+        analysis = analyze_search_terms(rows)
+        payload["analysis"] = analysis
+        payload["summary"] = build_search_terms_summary(rows, analysis=analysis)
+    else:
+        payload["summary"] = build_search_terms_summary(rows)
+
+    return payload, 200
 
 
 def build_campaign_analysis_response(stats_payload: dict, focus: Optional[str] = None) -> dict:
@@ -4755,10 +4778,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"status": "error", "message": "campaign_id must be a positive integer or numeric string"}, 400)
                 return
 
+            analyze = data.get("analyze", False)
+            if not isinstance(analyze, bool):
+                self._send_json({"status": "error", "message": "analyze must be boolean when provided"}, 400)
+                return
+
             payload, status_code = build_search_terms_response(
                 campaign_id=campaign_id,
                 raw_date_from=data.get("date_from"),
                 raw_date_to=data.get("date_to"),
+                analyze=analyze,
             )
             self._send_json(payload, status_code)
             return
