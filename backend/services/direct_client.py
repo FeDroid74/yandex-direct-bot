@@ -600,6 +600,74 @@ class YandexDirectClient:
         )
         return response.body
 
+
+    def get_keywords(
+        self,
+        *,
+        ad_group_ids: Optional[List[int]] = None,
+        campaign_ids: Optional[List[int]] = None,
+        ids: Optional[List[int]] = None,
+        field_names: Optional[List[str]] = None,
+        include_autotargeting_settings: bool = False,
+    ) -> Dict[str, Any]:
+        selection_criteria: Dict[str, Any] = {}
+        if ids:
+            selection_criteria["Ids"] = ids
+        if ad_group_ids:
+            selection_criteria["AdGroupIds"] = ad_group_ids
+        if campaign_ids:
+            selection_criteria["CampaignIds"] = campaign_ids
+
+        if not selection_criteria:
+            raise YandexDirectClientError("keywords.get requires ids, ad_group_ids, or campaign_ids")
+
+        params: Dict[str, Any] = {
+            "SelectionCriteria": selection_criteria,
+            "FieldNames": field_names or [
+                "Id",
+                "Keyword",
+                "State",
+                "Status",
+                "ServingStatus",
+                "AdGroupId",
+                "CampaignId",
+            ],
+        }
+
+        if include_autotargeting_settings:
+            params["AutotargetingSettingsCategoriesFieldNames"] = [
+                "Exact",
+                "Narrow",
+                "Alternative",
+                "Accessory",
+                "Broader",
+            ]
+            params["AutotargetingSettingsBrandOptionsFieldNames"] = [
+                "WithoutBrands",
+                "WithAdvertiserBrand",
+                "WithCompetitorsBrand",
+            ]
+
+        response = self.call_v501(
+            service="keywords",
+            method="get",
+            params=params,
+        )
+        return response.body
+
+    def add_keywords(
+        self,
+        keywords: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        response = self.call_v501(
+            service="keywords",
+            method="add",
+            params={
+                "Keywords": keywords,
+            },
+        )
+        return response.body
+
     def update_autotargeting_settings(
         self,
         autotargeting_id: int,

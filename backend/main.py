@@ -2789,6 +2789,151 @@ def build_campaign_enrichment_group_negative_keywords(
     return result
 
 
+CAMPAIGN_ENRICHMENT_KEYWORD_TECHNICAL_TOKENS = {
+    "artfarfor",
+    "артфарфор",
+    "openclaw",
+    "production",
+    "sandbox",
+    "upc",
+    "campaign",
+    "group",
+    "adgroup",
+    "ads",
+    "ad",
+    "draft",
+    "main",
+    "backend",
+}
+
+
+def extract_campaign_enrichment_keyword_tokens(value: str) -> list[str]:
+    tokens: list[str] = []
+    seen_tokens = set()
+
+    for token in re.findall(r"[0-9a-zа-я]+", normalize_match_text(value)):
+        if token in SITE_THEME_STOPWORDS or token in CAMPAIGN_ENRICHMENT_KEYWORD_TECHNICAL_TOKENS or token.isdigit() or len(token) < 2:
+            continue
+        if token in seen_tokens:
+            continue
+        seen_tokens.add(token)
+        tokens.append(token)
+
+    return tokens
+
+
+def normalize_campaign_enrichment_keyword_phrase(value: str) -> Optional[str]:
+    normalized = normalize_match_text(clean_inline_text(value))
+    if not normalized:
+        return None
+
+    tokens: list[str] = []
+    for token in re.findall(r"[0-9a-zа-я]+", normalized):
+        if token in CAMPAIGN_ENRICHMENT_KEYWORD_TECHNICAL_TOKENS or token.isdigit():
+            continue
+        if len(token) < 2 and token not in {"в", "из"}:
+            continue
+        tokens.append(token)
+
+    if not tokens:
+        return None
+
+    return " ".join(tokens[:7])
+
+
+def build_campaign_enrichment_keywords_for_group(
+    theme: str,
+    ad_group_name: str,
+    current_keywords: Optional[list[str]] = None,
+) -> list[str]:
+    theme_text = clean_inline_text(theme)
+    normalized_theme = normalize_campaign_enrichment_keyword_phrase(theme_text)
+    if normalized_theme is None:
+        return []
+
+    normalized_group_name = normalize_match_text(ad_group_name)
+    allowed_suffixes: list[str] = []
+    if "в подарок" in normalized_group_name:
+        allowed_suffixes.append("в подарок")
+    if "для подарка" in normalized_group_name:
+        allowed_suffixes.append("для подарка")
+    if "для интерьера" in normalized_group_name:
+        allowed_suffixes.append("для интерьера")
+    if "для коллекции" in normalized_group_name:
+        allowed_suffixes.append("для коллекции")
+
+    candidate_phrases = [
+        theme_text,
+        f"{theme_text} фарфор",
+    ]
+
+    for suffix in allowed_suffixes:
+        candidate_phrases.extend(
+            [
+                f"{theme_text} {suffix}",
+                f"{theme_text} {suffix} фарфор",
+            ]
+        )
+
+    existing_normalized = {
+        normalize_match_text(keyword)
+        for keyword in (current_keywords or [])
+        if normalize_non_empty_string(keyword) is not None
+    }
+
+    prepared_keywords: list[str] = []
+    seen_keywords = set()
+    for candidate in candidate_phrases:
+        normalized_keyword = normalize_campaign_enrichment_keyword_phrase(candidate)
+        if normalized_keyword is None:
+            continue
+        normalized_key = normalize_match_text(normalized_keyword)
+        if normalized_key in existing_normalized or normalized_key in seen_keywords:
+            continue
+        seen_keywords.add(normalized_key)
+        prepared_keywords.append(normalized_keyword)
+        if len(prepared_keywords) >= 5:
+            break
+
+    return prepared_keywords
+
+
+def build_campaign_enrichment_keywords(
+    ad_groups: list[dict],
+    theme: str,
+    current_keywords_by_ad_group: Optional[dict[int, list[str]]] = None,
+) -> list[dict]:
+    keywords_by_group = current_keywords_by_ad_group or {}
+    result: list[dict] = []
+
+    for ad_group in ad_groups:
+        if not isinstance(ad_group, dict):
+            continue
+        ad_group_id = normalize_positive_int_id(ad_group.get("Id") or ad_group.get("id"))
+        ad_group_name = normalize_non_empty_string(ad_group.get("Name") or ad_group.get("name"))
+        if ad_group_id is None or ad_group_name is None:
+            continue
+
+        prepared_keywords = build_campaign_enrichment_keywords_for_group(
+            theme=theme,
+            ad_group_name=ad_group_name,
+            current_keywords=keywords_by_group.get(ad_group_id),
+        )
+        if not prepared_keywords:
+            continue
+
+        result.append(
+            {
+                "ad_group_id": str(ad_group_id),
+                "ad_group_name": ad_group_name,
+                "keywords": prepared_keywords,
+            }
+        )
+
+    return result
+
+
+
 def extract_ad_extension_ids_from_raw_ad(raw_ad: dict) -> list[int]:
     if not isinstance(raw_ad, dict):
         return []
@@ -2833,6 +2978,33 @@ def collect_campaign_context_for_enrichment(client: YandexDirectClient, campaign
     ad_ids: list[int] = []
     ad_extension_ids_by_ad_id: dict[int, list[int]] = {}
     warnings: list[str] = []
+    keywords_by_ad_group_id: dict[int, list[str]] = {}
+
+    try:
+        current_keywords_result = client.get_keywords(
+            campaign_ids=[campaign_id],
+            field_names=[
+                "Id",
+                "Keyword",
+                "State",
+                "Status",
+                "ServingStatus",
+                "AdGroupId",
+                "CampaignId",
+            ],
+        )
+    except YandexDirectClientError as e:
+        warnings.append(f"Could not list current keywords for campaign {campaign_id}: {str(e)}")
+    else:
+        raw_keywords = current_keywords_result.get("result", {}).get("Keywords", [])
+        for raw_keyword in raw_keywords:
+            if not isinstance(raw_keyword, dict):
+                continue
+            ad_group_id = normalize_ad_group_id(raw_keyword.get("AdGroupId"))
+            keyword_text = normalize_non_empty_string(raw_keyword.get("Keyword"))
+            if ad_group_id is None or keyword_text is None or keyword_text == "---autotargeting":
+                continue
+            keywords_by_ad_group_id.setdefault(ad_group_id, []).append(keyword_text)
 
     for raw_ad_group in ad_groups:
         if not isinstance(raw_ad_group, dict):
@@ -2862,6 +3034,7 @@ def collect_campaign_context_for_enrichment(client: YandexDirectClient, campaign
             "ad_groups": ad_groups,
             "ad_ids": ad_ids,
             "ad_extension_ids_by_ad_id": ad_extension_ids_by_ad_id,
+            "keywords_by_ad_group_id": keywords_by_ad_group_id,
             "warnings": warnings,
         },
     }
@@ -2905,6 +3078,11 @@ def build_campaign_enrichment_preview_payload(client: YandexDirectClient, campai
                 "tracking_params": build_campaign_enrichment_tracking_params(theme),
                 "sitelinks": sitelinks,
                 "callouts": build_campaign_enrichment_callouts(theme),
+                "keywords": build_campaign_enrichment_keywords(
+                    context_payload["ad_groups"],
+                    theme,
+                    context_payload.get("keywords_by_ad_group_id"),
+                ),
                 "group_negative_keywords": build_campaign_enrichment_group_negative_keywords(
                     context_payload["ad_groups"],
                     theme,
@@ -6308,6 +6486,7 @@ class Handler(BaseHTTPRequestHandler):
             warnings = list(preview_payload["warnings"])
             applied = {}
             errors = []
+            keywords_added: list[dict] = []
             current_counter_ids = []
             for item in preview_payload["campaign"].get("UnifiedCampaign", {}).get("CounterIds", {}).get("Items", []):
                 normalized_item = normalize_positive_int_id(item)
@@ -6469,6 +6648,120 @@ class Handler(BaseHTTPRequestHandler):
                     warnings.append("Could not apply group-level negative keywords to some ad groups.")
                     errors.append({"step": "apply_group_negative_keywords", "errors": group_negative_keywords_errors})
 
+            keyword_errors: list[dict] = []
+            for item in preview.get("keywords", []):
+                if not isinstance(item, dict):
+                    continue
+                ad_group_id = normalize_positive_int_id(item.get("ad_group_id"))
+                if ad_group_id is None:
+                    continue
+
+                prepared_keywords = []
+                for raw_keyword in item.get("keywords", []):
+                    normalized_keyword = normalize_campaign_enrichment_keyword_phrase(raw_keyword)
+                    if normalized_keyword is None or normalized_keyword == "---autotargeting":
+                        continue
+                    prepared_keywords.append({"AdGroupId": ad_group_id, "Keyword": normalized_keyword})
+
+                if not prepared_keywords:
+                    continue
+
+                try:
+                    add_keywords_result = client.add_keywords(prepared_keywords)
+                except YandexDirectClientError as e:
+                    keyword_errors.append(
+                        {
+                            "ad_group_id": str(ad_group_id),
+                            "message": str(e),
+                        }
+                    )
+                    continue
+
+                raw_add_results = add_keywords_result.get("result", {}).get("AddResults", [])
+                if not isinstance(raw_add_results, list) or not raw_add_results:
+                    keyword_errors.append(
+                        {
+                            "ad_group_id": str(ad_group_id),
+                            "message": "empty AddResults from Yandex Direct for keywords",
+                            "raw": add_keywords_result,
+                        }
+                    )
+                    continue
+
+                current_keyword_ids: list[str] = []
+                current_keyword_errors: list[dict] = []
+                current_keyword_warnings: list[dict] = []
+
+                for index, action_result in enumerate(raw_add_results):
+                    source_keyword = prepared_keywords[index]["Keyword"] if index < len(prepared_keywords) else None
+                    if not isinstance(action_result, dict):
+                        current_keyword_errors.append(
+                            {
+                                "keyword": source_keyword,
+                                "message": "invalid AddResults item",
+                                "raw": action_result,
+                            }
+                        )
+                        continue
+
+                    if action_result.get("Warnings"):
+                        current_keyword_warnings.append(
+                            {
+                                "keyword": source_keyword,
+                                "warnings": action_result.get("Warnings", []),
+                            }
+                        )
+
+                    if action_result.get("Errors"):
+                        current_keyword_errors.append(
+                            {
+                                "keyword": source_keyword,
+                                "errors": action_result.get("Errors", []),
+                            }
+                        )
+                        continue
+
+                    keyword_id = normalize_positive_int_id(action_result.get("Id"))
+                    if keyword_id is None:
+                        current_keyword_errors.append(
+                            {
+                                "keyword": source_keyword,
+                                "message": "keyword id is missing in AddResults",
+                                "raw": action_result,
+                            }
+                        )
+                        continue
+
+                    keyword_id_as_text = str(keyword_id)
+                    if keyword_id_as_text not in current_keyword_ids:
+                        current_keyword_ids.append(keyword_id_as_text)
+
+                if current_keyword_ids:
+                    keywords_added.append(
+                        {
+                            "ad_group_id": str(ad_group_id),
+                            "keyword_ids": current_keyword_ids,
+                        }
+                    )
+
+                if current_keyword_warnings:
+                    warnings.append(f"Yandex Direct returned warnings for some keywords in ad_group {ad_group_id}.")
+
+                if current_keyword_errors:
+                    keyword_errors.append(
+                        {
+                            "ad_group_id": str(ad_group_id),
+                            "errors": current_keyword_errors,
+                        }
+                    )
+
+            if keywords_added:
+                applied["keywords"] = preview.get("keywords", [])
+
+            if preview.get("keywords") and keyword_errors:
+                warnings.append("Could not add some keywords to some ad groups.")
+                errors.append({"step": "add_keywords", "errors": keyword_errors})
+
             try:
                 negative_set_name = f"OpenClaw {preview_payload['theme']} {datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
                 negative_set_result = client.add_negative_keyword_shared_set(
@@ -6524,6 +6817,7 @@ class Handler(BaseHTTPRequestHandler):
                         "theme": preview_payload["theme"],
                         "errors": errors,
                         "warnings": warnings,
+                        "keywords_added": keywords_added,
                         "not_confirmed": preview_payload["not_confirmed"],
                     },
                     400,
@@ -6539,6 +6833,7 @@ class Handler(BaseHTTPRequestHandler):
                     "applied": applied,
                     "warnings": warnings,
                     "errors": errors,
+                    "keywords_added": keywords_added,
                     "not_confirmed": preview_payload["not_confirmed"],
                 },
                 200,
