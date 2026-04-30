@@ -16,7 +16,7 @@ from typing import List, Optional
 from config import settings
 from services.direct_client import YandexDirectClient, YandexDirectClientError
 from services.direct_mock import validate_campaign
-from services.search_terms_analyzer import analyze_search_terms
+from services.search_terms_analyzer import analyze_search_terms, build_negative_preview_candidates
 
 
 ALLOWED_TARGETS = {"sandbox", "production"}
@@ -3736,7 +3736,7 @@ def build_search_terms_summary(rows: list[dict], processing: bool = False, analy
     )
 
 
-def build_search_terms_response(campaign_id: int, raw_date_from=None, raw_date_to=None, analyze: bool = False):
+def build_search_terms_response(campaign_id: int, raw_date_from=None, raw_date_to=None, analyze: bool = False, target_cpa: Optional[float] = None):
     normalized_date_from = normalize_iso_date(raw_date_from) if raw_date_from is not None else None
     normalized_date_to = normalize_iso_date(raw_date_to) if raw_date_to is not None else None
 
@@ -3811,13 +3811,78 @@ def build_search_terms_response(campaign_id: int, raw_date_from=None, raw_date_t
     }
 
     if analyze:
-        analysis = analyze_search_terms(rows)
+        analysis = analyze_search_terms(rows, target_cpa=target_cpa)
         payload["analysis"] = analysis
         payload["summary"] = build_search_terms_summary(rows, analysis=analysis)
     else:
         payload["summary"] = build_search_terms_summary(rows)
 
     return payload, 200
+
+
+
+def build_search_term_negative_preview_summary(candidates: list[dict], processing: bool = False) -> str:
+    if processing:
+        return "Отчёт по поисковым запросам ещё формируется. Ничего не применено."
+
+    if not candidates:
+        return "Кандидаты в минус-фразы не найдены. Ничего не применено."
+
+    examples = "; ".join(
+        f'{item["suggested_negative"]} <- {item["query"]} ({item["reason"]})'
+        for item in candidates[:5]
+    )
+    return (
+        f"Найдено {format_rub_value(len(candidates))} кандидатов в минус-фразы. "
+        f"Примеры: {examples}. Ничего не применено."
+    )
+
+
+def build_search_term_negative_preview_response(campaign_id: int, raw_date_from=None, raw_date_to=None, raw_target_cpa=None):
+    target_cpa = None
+    if raw_target_cpa is not None:
+        target_cpa = normalize_positive_number(raw_target_cpa)
+        if target_cpa is None:
+            return {"status": "error", "message": "target_cpa must be a positive number when provided"}, 400
+
+    payload, status_code = build_search_terms_response(
+        campaign_id=campaign_id,
+        raw_date_from=raw_date_from,
+        raw_date_to=raw_date_to,
+        analyze=True,
+        target_cpa=target_cpa,
+    )
+
+    if payload.get("status") == "error":
+        return payload, status_code
+
+    if payload.get("status") == "processing":
+        return (
+            {
+                "status": "processing",
+                "campaign_id": payload.get("campaign_id", str(campaign_id)),
+                "request_id": payload.get("request_id", ""),
+                "retry_in": payload.get("retry_in", ""),
+                "summary": build_search_term_negative_preview_summary([], processing=True),
+            },
+            status_code,
+        )
+
+    rows = payload.get("rows", [])
+    analysis = payload.get("analysis", {})
+    candidates = build_negative_preview_candidates(rows, analysis, target_cpa=target_cpa)
+
+    return (
+        {
+            "status": "success",
+            "campaign_id": payload.get("campaign_id", str(campaign_id)),
+            "date_from": payload.get("date_from", ""),
+            "date_to": payload.get("date_to", ""),
+            "candidates": candidates,
+            "summary": build_search_term_negative_preview_summary(candidates),
+        },
+        200,
+    )
 
 
 def build_campaign_analysis_response(stats_payload: dict, focus: Optional[str] = None) -> dict:
@@ -4788,6 +4853,35 @@ class Handler(BaseHTTPRequestHandler):
                 raw_date_from=data.get("date_from"),
                 raw_date_to=data.get("date_to"),
                 analyze=analyze,
+            )
+            self._send_json(payload, status_code)
+            return
+
+
+        if self.path == "/preview_search_term_negatives":
+            raw_target = data.get("target", "production")
+            target = raw_target.strip().lower() if isinstance(raw_target, str) else ""
+
+            if target != "production":
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": "Search term negative preview is enabled only for production; sandbox support is not confirmed",
+                    },
+                    400,
+                )
+                return
+
+            campaign_id = normalize_campaign_id(data.get("campaign_id"))
+            if campaign_id is None:
+                self._send_json({"status": "error", "message": "campaign_id must be a positive integer or numeric string"}, 400)
+                return
+
+            payload, status_code = build_search_term_negative_preview_response(
+                campaign_id=campaign_id,
+                raw_date_from=data.get("date_from"),
+                raw_date_to=data.get("date_to"),
+                raw_target_cpa=data.get("target_cpa"),
             )
             self._send_json(payload, status_code)
             return

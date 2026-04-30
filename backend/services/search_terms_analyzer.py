@@ -1,4 +1,5 @@
 from typing import Any, Optional
+import re
 
 
 def _normalize_query(value: Any) -> Optional[str]:
@@ -125,3 +126,121 @@ def analyze_search_terms(rows, target_cpa: Optional[float] = None):
         "top_performers": [_build_output_item(item) for item in top_performers],
         "waste_queries": [_build_output_item(item) for item in waste_queries],
     }
+
+
+
+IRRELEVANT_NEGATIVE_TOKENS = (
+    "костюм",
+    "одежда",
+    "нос",
+    "грим",
+    "макияж",
+    "аниматор",
+    "цирк",
+    "раскраска",
+    "рисунок",
+    "картинки",
+    "фото",
+    "обои",
+    "фильм",
+    "актеры",
+    "видео",
+    "википедия",
+    "бесплатно",
+    "скачать",
+    "wildberries",
+    "ozon",
+    "валберис",
+    "маркет",
+    "авито",
+)
+
+
+def _extract_query_tokens(value: str) -> list[str]:
+    return re.findall(r"[0-9a-zа-я]+", value.lower())
+
+
+def build_negative_preview_candidates(rows, analysis: dict, target_cpa: Optional[float] = None):
+    negative_queries = {
+        item["query"]
+        for item in analysis.get("candidates_negative", [])
+        if isinstance(item, dict) and isinstance(item.get("query"), str)
+    }
+
+    aggregated: dict[str, dict] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+
+        query = _normalize_query(_get_value(row, "query", "Query"))
+        if query is None:
+            continue
+
+        ad_group_id_value = _get_value(row, "ad_group_id", "AdGroupId")
+        ad_group_id = ""
+        if ad_group_id_value is not None:
+            ad_group_id = str(ad_group_id_value).strip()
+
+        item = aggregated.setdefault(
+            query,
+            {
+                "query": query,
+                "clicks": 0,
+                "cost": 0.0,
+                "conversions": 0.0,
+                "ad_group_ids": [],
+            },
+        )
+        item["clicks"] += _to_int(_get_value(row, "clicks", "Clicks"))
+        item["cost"] += _to_float(_get_value(row, "cost", "Cost"))
+        item["conversions"] += _to_float(_get_value(row, "conversions", "Conversions"))
+        if ad_group_id and ad_group_id not in item["ad_group_ids"]:
+            item["ad_group_ids"].append(ad_group_id)
+
+    candidates = []
+    seen = set()
+
+    for query, item in aggregated.items():
+        matched_tokens = [token for token in _extract_query_tokens(query) if token in IRRELEVANT_NEGATIVE_TOKENS]
+        is_negative_candidate = query in negative_queries
+
+        if not matched_tokens and not is_negative_candidate:
+            continue
+
+        suggested_negative = matched_tokens[0] if matched_tokens else query
+        ad_group_ids = item["ad_group_ids"]
+        if matched_tokens:
+            level = "campaign"
+            ad_group_id = ""
+            if len(matched_tokens) == 1:
+                reason = f"Запрос содержит нерелевантный токен '{matched_tokens[0]}'."
+            else:
+                reason = f"Запрос содержит нерелевантные токены: {', '.join(matched_tokens)}."
+        else:
+            level = "ad_group" if len(ad_group_ids) == 1 else "campaign"
+            ad_group_id = ad_group_ids[0] if level == "ad_group" else ""
+            if target_cpa is not None and target_cpa > 0 and item["cost"] >= (2 * target_cpa) and item["conversions"] == 0:
+                reason = f"Расход {round(item['cost'], 2)} без конверсий превысил двойной target CPA."
+            else:
+                reason = "Запрос получил не менее 10 кликов без конверсий."
+
+        signature = (query, suggested_negative, level, ad_group_id)
+        if signature in seen:
+            continue
+        seen.add(signature)
+
+        candidates.append(
+            {
+                "query": query,
+                "suggested_negative": suggested_negative,
+                "level": level,
+                "reason": reason,
+                "ad_group_id": ad_group_id,
+                "clicks": item["clicks"],
+                "cost": round(item["cost"], 2),
+                "conversions": round(item["conversions"], 4),
+            }
+        )
+
+    candidates.sort(key=lambda item: (item["cost"], item["clicks"], item["query"]), reverse=True)
+    return candidates
