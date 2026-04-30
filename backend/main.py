@@ -3885,6 +3885,298 @@ def build_search_term_negative_preview_response(campaign_id: int, raw_date_from=
     )
 
 
+
+def collect_campaign_negative_keyword_state(client: YandexDirectClient, campaign_id: int) -> dict:
+    current_result = client.get_campaign_details(campaign_id)
+    campaigns = current_result.get("result", {}).get("Campaigns", [])
+    if not campaigns:
+        return {
+            "ok": False,
+            "status": 404,
+            "payload": {
+                "status": "error",
+                "message": "campaign not found",
+                "target": "production",
+                "campaign_id": str(campaign_id),
+                "raw": current_result,
+            },
+        }
+
+    campaign = campaigns[0]
+    shared_set_ids = []
+    for item in campaign.get("UnifiedCampaign", {}).get("NegativeKeywordSharedSetIds", {}).get("Items", []):
+        normalized_item = normalize_positive_int_id(item)
+        if normalized_item is not None:
+            shared_set_ids.append(normalized_item)
+
+    warnings: list[str] = []
+    existing_negative_keywords: list[str] = []
+    seen_negative_keywords = set()
+
+    if shared_set_ids:
+        try:
+            shared_sets_result = client.get_negative_keyword_shared_sets(ids=shared_set_ids)
+        except YandexDirectClientError as e:
+            warnings.append(f"Could not confirm current campaign negative keywords: {str(e)}")
+        else:
+            raw_shared_sets = shared_sets_result.get("result", {}).get("NegativeKeywordSharedSets", [])
+            for raw_shared_set in raw_shared_sets:
+                if not isinstance(raw_shared_set, dict):
+                    continue
+                normalized_keywords = normalize_negative_keywords(raw_shared_set.get("NegativeKeywords")) or []
+                for keyword in normalized_keywords:
+                    normalized_keyword = normalize_non_empty_string(keyword)
+                    if normalized_keyword is None or normalized_keyword in seen_negative_keywords:
+                        continue
+                    seen_negative_keywords.add(normalized_keyword)
+                    existing_negative_keywords.append(normalized_keyword)
+
+    return {
+        "ok": True,
+        "status": 200,
+        "payload": {
+            "campaign": campaign,
+            "shared_set_ids": shared_set_ids,
+            "existing_negative_keywords": existing_negative_keywords,
+            "warnings": warnings,
+        },
+    }
+
+
+def build_apply_search_term_negative_summary(applied_keywords: list[str], warnings: list[str], errors: list[dict], processing: bool = False) -> str:
+    if processing:
+        return "Отчёт по поисковым запросам ещё формируется. Ничего не применено."
+
+    if applied_keywords:
+        examples = ", ".join(applied_keywords[:5])
+        return (
+            f"Применено {format_rub_value(len(applied_keywords))} минус-фраз. "
+            f"Примеры: {examples}."
+        )
+
+    if errors:
+        return "Минус-фразы не применены из-за ошибки."
+
+    if warnings:
+        return "Новых минус-фраз для применения не найдено."
+
+    return "Минус-фразы не применены."
+
+
+def build_apply_search_term_negatives_response(campaign_id: int, raw_date_from=None, raw_date_to=None, raw_target_cpa=None):
+    target_cpa = None
+    if raw_target_cpa is not None:
+        target_cpa = normalize_positive_number(raw_target_cpa)
+        if target_cpa is None:
+            return {"status": "error", "message": "target_cpa must be a positive number when provided"}, 400
+
+    client = YandexDirectClient.for_target("production")
+
+    preview_payload, preview_status_code = build_search_term_negative_preview_response(
+        campaign_id=campaign_id,
+        raw_date_from=raw_date_from,
+        raw_date_to=raw_date_to,
+        raw_target_cpa=raw_target_cpa,
+    )
+
+    if preview_payload.get("status") == "error":
+        return preview_payload, preview_status_code
+
+    if preview_payload.get("status") == "processing":
+        preview_payload["summary"] = build_apply_search_term_negative_summary([], [], [], processing=True)
+        return preview_payload, preview_status_code
+
+    state_result = collect_campaign_negative_keyword_state(client=client, campaign_id=campaign_id)
+    if not state_result["ok"]:
+        return state_result["payload"], state_result["status"]
+
+    state_payload = state_result["payload"]
+    warnings = list(state_payload.get("warnings", []))
+    errors: list[dict] = []
+
+    existing_negative_keywords = set(state_payload.get("existing_negative_keywords", []))
+    shared_set_ids = list(state_payload.get("shared_set_ids", []))
+    prepared_negative_keywords: list[str] = []
+    seen_negative_keywords = set()
+
+    for item in preview_payload.get("candidates", []):
+        if not isinstance(item, dict):
+            continue
+        if item.get("level") != "campaign":
+            continue
+        suggested_negative = normalize_non_empty_string(item.get("suggested_negative"))
+        query = normalize_non_empty_string(item.get("query"))
+        if suggested_negative is None:
+            continue
+        if query is not None and normalize_match_text(suggested_negative) == normalize_match_text(query):
+            warnings.append(f"Skipped full-query negative candidate '{suggested_negative}'.")
+            continue
+        if suggested_negative in existing_negative_keywords or suggested_negative in seen_negative_keywords:
+            continue
+        seen_negative_keywords.add(suggested_negative)
+        prepared_negative_keywords.append(suggested_negative)
+
+    if not prepared_negative_keywords:
+        return (
+            {
+                "status": "success",
+                "campaign_id": str(campaign_id),
+                "applied": {
+                    "negative_keywords": [],
+                    "source": "search_terms_preview",
+                    "count": 0,
+                },
+                "warnings": warnings,
+                "errors": errors,
+                "summary": build_apply_search_term_negative_summary([], warnings, errors),
+            },
+            200,
+        )
+
+    if len(shared_set_ids) >= 3:
+        warnings.append("NegativeKeywordSharedSetIds limit prevented applying new search-term negatives to the campaign.")
+        errors.append({"step": "attach_negative_keywords", "message": "NegativeKeywordSharedSetIds supports at most 3 items"})
+        return (
+            {
+                "status": "error",
+                "campaign_id": str(campaign_id),
+                "applied": {
+                    "negative_keywords": [],
+                    "source": "search_terms_preview",
+                    "count": 0,
+                },
+                "warnings": warnings,
+                "errors": errors,
+                "summary": build_apply_search_term_negative_summary([], warnings, errors),
+            },
+            400,
+        )
+
+    negative_set_name = f"OpenClaw Search Terms {campaign_id} {datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+
+    try:
+        negative_set_result = client.add_negative_keyword_shared_set(
+            name=negative_set_name,
+            negative_keywords=prepared_negative_keywords,
+        )
+    except YandexDirectClientError as e:
+        errors.append({"step": "create_negative_keywords", "message": str(e)})
+        return (
+            {
+                "status": "error",
+                "campaign_id": str(campaign_id),
+                "applied": {
+                    "negative_keywords": [],
+                    "source": "search_terms_preview",
+                    "count": 0,
+                },
+                "warnings": warnings,
+                "errors": errors,
+                "summary": build_apply_search_term_negative_summary([], warnings, errors),
+            },
+            502,
+        )
+
+    parsed_negative_set = parse_add_result(negative_set_result, "negative_keyword_shared_set")
+    if not parsed_negative_set["ok"]:
+        errors.append({"step": "create_negative_keywords", "error": parsed_negative_set["payload"]})
+        return (
+            {
+                "status": "error",
+                "campaign_id": str(campaign_id),
+                "applied": {
+                    "negative_keywords": [],
+                    "source": "search_terms_preview",
+                    "count": 0,
+                },
+                "warnings": warnings,
+                "errors": errors,
+                "summary": build_apply_search_term_negative_summary([], warnings, errors),
+            },
+            parsed_negative_set["status"],
+        )
+
+    new_shared_set_id = int(parsed_negative_set["payload"]["id"])
+    updated_shared_set_ids = shared_set_ids + [new_shared_set_id]
+
+    if len(updated_shared_set_ids) > 3:
+        warnings.append("NegativeKeywordSharedSetIds limit prevented applying new search-term negatives to the campaign.")
+        errors.append({"step": "attach_negative_keywords", "message": "NegativeKeywordSharedSetIds supports at most 3 items"})
+        return (
+            {
+                "status": "error",
+                "campaign_id": str(campaign_id),
+                "applied": {
+                    "negative_keywords": [],
+                    "source": "search_terms_preview",
+                    "count": 0,
+                },
+                "warnings": warnings,
+                "errors": errors,
+                "summary": build_apply_search_term_negative_summary([], warnings, errors),
+            },
+            400,
+        )
+
+    try:
+        attach_result = client.update_campaign_negative_keyword_shared_set_ids(
+            campaign_id=campaign_id,
+            shared_set_ids=updated_shared_set_ids,
+        )
+    except YandexDirectClientError as e:
+        errors.append({"step": "attach_negative_keywords", "message": str(e)})
+        return (
+            {
+                "status": "error",
+                "campaign_id": str(campaign_id),
+                "applied": {
+                    "negative_keywords": [],
+                    "source": "search_terms_preview",
+                    "count": 0,
+                },
+                "warnings": warnings,
+                "errors": errors,
+                "summary": build_apply_search_term_negative_summary([], warnings, errors),
+            },
+            502,
+        )
+
+    parsed_attach = parse_update_result(attach_result, "campaign")
+    if not parsed_attach["ok"]:
+        errors.append({"step": "attach_negative_keywords", "error": parsed_attach["payload"]})
+        return (
+            {
+                "status": "error",
+                "campaign_id": str(campaign_id),
+                "applied": {
+                    "negative_keywords": [],
+                    "source": "search_terms_preview",
+                    "count": 0,
+                },
+                "warnings": warnings,
+                "errors": errors,
+                "summary": build_apply_search_term_negative_summary([], warnings, errors),
+            },
+            parsed_attach["status"],
+        )
+
+    return (
+        {
+            "status": "success",
+            "campaign_id": str(campaign_id),
+            "applied": {
+                "negative_keywords": prepared_negative_keywords,
+                "source": "search_terms_preview",
+                "count": len(prepared_negative_keywords),
+            },
+            "warnings": warnings,
+            "errors": errors,
+            "summary": build_apply_search_term_negative_summary(prepared_negative_keywords, warnings, errors),
+        },
+        200,
+    )
+
+
 def build_campaign_analysis_response(stats_payload: dict, focus: Optional[str] = None) -> dict:
     campaign_id = stats_payload.get("campaign_id")
     date_from = stats_payload.get("date_from")
@@ -4878,6 +5170,40 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             payload, status_code = build_search_term_negative_preview_response(
+                campaign_id=campaign_id,
+                raw_date_from=data.get("date_from"),
+                raw_date_to=data.get("date_to"),
+                raw_target_cpa=data.get("target_cpa"),
+            )
+            self._send_json(payload, status_code)
+            return
+
+
+        if self.path == "/apply_search_term_negatives":
+            confirm = resolve_confirm(data)
+            if not confirm:
+                self._send_json({"status": "error", "message": "apply_search_term_negatives requires explicit confirm=true"}, 400)
+                return
+
+            raw_target = data.get("target", "production")
+            target = raw_target.strip().lower() if isinstance(raw_target, str) else ""
+
+            if target != "production":
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": "Search term negative apply is enabled only for production; sandbox support is not confirmed",
+                    },
+                    400,
+                )
+                return
+
+            campaign_id = normalize_campaign_id(data.get("campaign_id"))
+            if campaign_id is None:
+                self._send_json({"status": "error", "message": "campaign_id must be a positive integer or numeric string"}, 400)
+                return
+
+            payload, status_code = build_apply_search_term_negatives_response(
                 campaign_id=campaign_id,
                 raw_date_from=data.get("date_from"),
                 raw_date_to=data.get("date_to"),
