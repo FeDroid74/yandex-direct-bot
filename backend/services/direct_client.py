@@ -48,6 +48,23 @@ class YandexDirectClient:
         "Maps": "NO",
     }
 
+    PLACEMENT_BOTH = "both"
+    PLACEMENT_SEARCH_ONLY = "search_only"
+    PLACEMENT_NETWORK_ONLY = "network_only"
+
+    PLACEMENT_ALIASES = {
+        "both": PLACEMENT_BOTH,
+        "all": PLACEMENT_BOTH,
+        "search": PLACEMENT_SEARCH_ONLY,
+        "search_only": PLACEMENT_SEARCH_ONLY,
+        "poisk": PLACEMENT_SEARCH_ONLY,
+        "network": PLACEMENT_NETWORK_ONLY,
+        "network_only": PLACEMENT_NETWORK_ONLY,
+        "rsya": PLACEMENT_NETWORK_ONLY,
+        "rsy": PLACEMENT_NETWORK_ONLY,
+        "рся": PLACEMENT_NETWORK_ONLY,
+    }
+
     def __init__(
         self,
         base_url: Optional[str] = None,
@@ -71,6 +88,97 @@ class YandexDirectClient:
             return cls(base_url=settings.yandex_direct_production_base_url)
 
         raise YandexDirectClientError(f"unsupported target: {target}")
+
+    @classmethod
+    def normalize_placement_type(cls, placement_type: Optional[str]) -> str:
+        if placement_type is None:
+            return cls.PLACEMENT_BOTH
+
+        normalized = str(placement_type).strip().lower().replace("-", "_")
+        if normalized in cls.PLACEMENT_ALIASES:
+            return cls.PLACEMENT_ALIASES[normalized]
+
+        raise YandexDirectClientError(
+            "placement_type must be 'both', 'search_only', or 'network_only'"
+        )
+
+    @classmethod
+    def infer_unified_campaign_placement_type(cls, unified_campaign: Dict[str, Any]) -> str:
+        bidding_strategy = unified_campaign.get("BiddingStrategy", {})
+        search_strategy = bidding_strategy.get("Search", {})
+        network_strategy = bidding_strategy.get("Network", {})
+
+        search_type = str(search_strategy.get("BiddingStrategyType", "")).upper()
+        network_type = str(network_strategy.get("BiddingStrategyType", "")).upper()
+
+        if search_type == "SERVING_OFF" and network_type != "SERVING_OFF":
+            return cls.PLACEMENT_NETWORK_ONLY
+
+        if network_type == "SERVING_OFF" and search_type != "SERVING_OFF":
+            return cls.PLACEMENT_SEARCH_ONLY
+
+        search_places = search_strategy.get("PlacementTypes", {})
+        network_places = network_strategy.get("PlacementTypes", {})
+        search_enabled = any(value == "YES" for value in search_places.values())
+        network_enabled = any(value == "YES" for value in network_places.values())
+
+        if search_enabled and not network_enabled:
+            return cls.PLACEMENT_SEARCH_ONLY
+
+        if network_enabled and not search_enabled:
+            return cls.PLACEMENT_NETWORK_ONLY
+
+        return cls.PLACEMENT_BOTH
+
+    def build_unified_bidding_strategy(
+        self,
+        *,
+        goal_id: int,
+        cpa_micros: int,
+        weekly_budget_micros: int,
+        placement_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        normalized_placement = self.normalize_placement_type(placement_type)
+        pay_for_conversion = {
+            "GoalId": goal_id,
+            "Cpa": cpa_micros,
+            "WeeklySpendLimit": weekly_budget_micros,
+        }
+
+        search_pay_for_conversion = {
+            "BiddingStrategyType": "PAY_FOR_CONVERSION",
+            "PlacementTypes": dict(self.DEFAULT_SEARCH_PLACEMENT_TYPES),
+            "PayForConversion": dict(pay_for_conversion),
+        }
+        network_default = {
+            "BiddingStrategyType": "NETWORK_DEFAULT",
+            "PlacementTypes": dict(self.DEFAULT_NETWORK_PLACEMENT_TYPES),
+        }
+
+        if normalized_placement == self.PLACEMENT_SEARCH_ONLY:
+            return {
+                "Search": search_pay_for_conversion,
+                "Network": {
+                    "BiddingStrategyType": "SERVING_OFF",
+                },
+            }
+
+        if normalized_placement == self.PLACEMENT_NETWORK_ONLY:
+            return {
+                "Search": {
+                    "BiddingStrategyType": "SERVING_OFF",
+                },
+                "Network": {
+                    "BiddingStrategyType": "PAY_FOR_CONVERSION",
+                    "PlacementTypes": dict(self.DEFAULT_NETWORK_PLACEMENT_TYPES),
+                    "PayForConversion": dict(pay_for_conversion),
+                },
+            }
+
+        return {
+            "Search": search_pay_for_conversion,
+            "Network": network_default,
+        }
 
     def _build_headers(self) -> Dict[str, str]:
         if not self.oauth_token.strip():
@@ -484,6 +592,10 @@ class YandexDirectClient:
                     "Maps",
                     "SearchOrganizationList",
                 ],
+                "UnifiedCampaignNetworkStrategyPlacementTypesFieldNames": [
+                    "Network",
+                    "Maps",
+                ],
             },
         )
         return response.body
@@ -495,6 +607,7 @@ class YandexDirectClient:
         goal_id: Optional[int] = None,
         cpa_micros: Optional[int] = None,
         weekly_budget_micros: Optional[int] = None,
+        placement_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         campaign_item: Dict[str, Any] = {
             "Id": campaign_id,
@@ -504,7 +617,7 @@ class YandexDirectClient:
             campaign_item["Name"] = name
 
         strategy_update_requested = any(
-            value is not None for value in (goal_id, cpa_micros, weekly_budget_micros)
+            value is not None for value in (goal_id, cpa_micros, weekly_budget_micros, placement_type)
         )
 
         if strategy_update_requested:
@@ -514,19 +627,12 @@ class YandexDirectClient:
                 )
 
             campaign_item["UnifiedCampaign"] = {
-                "BiddingStrategy": {
-                    "Search": {
-                        "BiddingStrategyType": "PAY_FOR_CONVERSION",
-                        "PayForConversion": {
-                            "GoalId": goal_id,
-                            "Cpa": cpa_micros,
-                            "WeeklySpendLimit": weekly_budget_micros,
-                        },
-                    },
-                    "Network": {
-                        "BiddingStrategyType": "NETWORK_DEFAULT",
-                    },
-                }
+                "BiddingStrategy": self.build_unified_bidding_strategy(
+                    goal_id=goal_id,
+                    cpa_micros=cpa_micros,
+                    weekly_budget_micros=weekly_budget_micros,
+                    placement_type=placement_type,
+                )
             }
 
         response = self.call_v501(
@@ -545,6 +651,7 @@ class YandexDirectClient:
         goal_id: Optional[int] = None,
         cpa_micros: Optional[int] = None,
         weekly_budget_micros: Optional[int] = None,
+        placement_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         return self.update_campaign(
             campaign_id=campaign_id,
@@ -552,6 +659,7 @@ class YandexDirectClient:
             goal_id=goal_id,
             cpa_micros=cpa_micros,
             weekly_budget_micros=weekly_budget_micros,
+            placement_type=placement_type,
         )
 
     def update_campaign_production(
@@ -561,6 +669,7 @@ class YandexDirectClient:
         goal_id: Optional[int] = None,
         cpa_micros: Optional[int] = None,
         weekly_budget_micros: Optional[int] = None,
+        placement_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         return self.update_campaign(
             campaign_id=campaign_id,
@@ -568,6 +677,7 @@ class YandexDirectClient:
             goal_id=goal_id,
             cpa_micros=cpa_micros,
             weekly_budget_micros=weekly_budget_micros,
+            placement_type=placement_type,
         )
 
     def update_campaign_negative_keyword_shared_set_ids(
@@ -1149,6 +1259,7 @@ class YandexDirectClient:
         weekly_budget_micros: int,
         counter_id: int = DEFAULT_METRICA_COUNTER_ID,
         tracking_params: Optional[str] = None,
+        placement_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         campaign_item: Dict[str, Any] = {
             "Name": name,
@@ -1158,21 +1269,12 @@ class YandexDirectClient:
                 "CounterIds": {
                     "Items": [counter_id],
                 },
-                "BiddingStrategy": {
-                    "Search": {
-                        "BiddingStrategyType": "PAY_FOR_CONVERSION",
-                        "PlacementTypes": dict(self.DEFAULT_SEARCH_PLACEMENT_TYPES),
-                        "PayForConversion": {
-                            "GoalId": goal_id,
-                            "Cpa": cpa_micros,
-                            "WeeklySpendLimit": weekly_budget_micros,
-                        },
-                    },
-                    "Network": {
-                        "BiddingStrategyType": "NETWORK_DEFAULT",
-                        "PlacementTypes": dict(self.DEFAULT_NETWORK_PLACEMENT_TYPES),
-                    },
-                },
+                "BiddingStrategy": self.build_unified_bidding_strategy(
+                    goal_id=goal_id,
+                    cpa_micros=cpa_micros,
+                    weekly_budget_micros=weekly_budget_micros,
+                    placement_type=placement_type,
+                ),
             },
         }
 
@@ -1199,6 +1301,7 @@ class YandexDirectClient:
         weekly_budget_micros: int,
         counter_id: int = DEFAULT_METRICA_COUNTER_ID,
         tracking_params: Optional[str] = None,
+        placement_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         return self.add_unified_campaign(
             name=name,
@@ -1208,6 +1311,7 @@ class YandexDirectClient:
             weekly_budget_micros=weekly_budget_micros,
             counter_id=counter_id,
             tracking_params=tracking_params,
+            placement_type=placement_type,
         )
 
     def add_unified_campaign_production(
@@ -1219,6 +1323,7 @@ class YandexDirectClient:
         weekly_budget_micros: int,
         counter_id: int = DEFAULT_METRICA_COUNTER_ID,
         tracking_params: Optional[str] = None,
+        placement_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         return self.add_unified_campaign(
             name=name,
@@ -1228,6 +1333,7 @@ class YandexDirectClient:
             weekly_budget_micros=weekly_budget_micros,
             counter_id=counter_id,
             tracking_params=tracking_params,
+            placement_type=placement_type,
         )
 
     def add_unified_ad_group(

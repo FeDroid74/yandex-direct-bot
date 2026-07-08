@@ -11,6 +11,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import zipfile
 from typing import List, Optional
 
 from config import settings
@@ -20,6 +21,7 @@ from services.search_terms_analyzer import analyze_search_terms, build_negative_
 
 
 ALLOWED_TARGETS = {"sandbox", "production"}
+ALLOWED_PLACEMENT_TYPES = {"both", "search_only", "network_only"}
 ALLOWED_OFFER_RETARGETING = {"YES", "NO"}
 ALLOWED_AUTOTARGETING_SETTINGS_VALUES = {"YES", "NO"}
 ALLOWED_AUTOTARGETING_CATEGORY_KEYS = {"Exact", "Narrow", "Alternative", "Accessory", "Broader"}
@@ -28,6 +30,8 @@ DEFAULT_METRICA_COUNTER_ID = 99041859
 DEFAULT_GOAL_ID = 352606262
 DEFAULT_PRODUCTION_REGION_IDS = [225]
 STATE_FILE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "STATE.md"))
+EXPORTS_DIR_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "exports"))
+CREATIVE_PROMPT_PACKS_DIR = os.path.join(EXPORTS_DIR_PATH, "creative_prompt_packs")
 ARTFARFOR_BASE_URL = "https://artfarfor.com/"
 ARTFARFOR_DOMAIN = "artfarfor.com"
 ARTFARFOR_IMAGE_ALLOWED_DOMAINS = {ARTFARFOR_DOMAIN, "static.insales-cdn.com"}
@@ -132,6 +136,24 @@ def resolve_target(payload: dict) -> str:
     if not isinstance(raw, str):
         return ""
     return raw.strip().lower()
+
+
+def normalize_placement_type(value, default: str = "both") -> Optional[str]:
+    if value in ("", None):
+        return default
+    if not isinstance(value, str):
+        return None
+    try:
+        return YandexDirectClient.normalize_placement_type(value)
+    except YandexDirectClientError:
+        return None
+
+
+def resolve_placement_type(payload: dict, default: str = "both") -> Optional[str]:
+    raw = payload.get("placement_type")
+    if raw in ("", None):
+        raw = payload.get("delivery_channel")
+    return normalize_placement_type(raw, default=default)
 
 
 def resolve_confirm(payload: dict) -> bool:
@@ -1891,6 +1913,352 @@ def download_site_image_bytes(image_url: str) -> dict:
     }
 
 
+def normalize_prompt_pack_filename_token(value, fallback: str = "item") -> str:
+    normalized = normalize_non_empty_string(str(value)) if value is not None else None
+    if normalized is None:
+        normalized = fallback
+    normalized = normalize_match_text(normalized)
+    normalized = re.sub(r"[^0-9a-zа-яё_-]+", "_", normalized, flags=re.IGNORECASE)
+    normalized = normalized.strip("_").lower()
+    if not normalized:
+        normalized = fallback
+    return normalized[:64]
+
+
+def resolve_site_image_file_extension(filename: str, content_type: str) -> str:
+    extension = os.path.splitext(filename or "")[1].lower()
+    if extension in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+        return extension
+
+    normalized_content_type = (content_type or "").split(";", 1)[0].strip().lower()
+    guessed_extension = mimetypes.guess_extension(normalized_content_type) if normalized_content_type else None
+    if guessed_extension in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+        return guessed_extension
+    return ".jpg"
+
+
+def resolve_creative_prompt_ad_group(draft_campaign: dict, ad_reference: dict) -> Optional[dict]:
+    if ad_reference.get("scope") != "ad_group":
+        return None
+    ad_group_index = ad_reference.get("ad_group_index")
+    if not isinstance(ad_group_index, int):
+        return None
+    return resolve_draft_ad_group_reference(draft_campaign, ad_group_index)
+
+
+def normalize_creative_prompt_title(value: str) -> str:
+    normalized = clean_inline_text(value)
+    if "|" in normalized:
+        normalized = normalized.split("|", 1)[0]
+    normalized = re.sub(r"\s*\|\s*ArtFarfor\s*$", "", normalized, flags=re.IGNORECASE)
+    return normalized.strip(" -|")
+
+
+def first_non_empty_string(*values) -> Optional[str]:
+    for value in values:
+        normalized = normalize_non_empty_string(value)
+        if normalized is not None:
+            return normalized
+    return None
+
+
+def build_creative_prompt_ad_context(
+    draft_campaign: dict,
+    ad_reference: dict,
+    draft_ad: dict,
+    ordinal: int,
+) -> dict:
+    ad_group = resolve_creative_prompt_ad_group(draft_campaign, ad_reference)
+    campaign_name = first_non_empty_string(draft_campaign.get("campaign_name"), draft_campaign.get("name"), "ArtFarfor") or "ArtFarfor"
+    group_name = first_non_empty_string(
+        ad_group.get("group_name") if isinstance(ad_group, dict) else None,
+        ad_group.get("name") if isinstance(ad_group, dict) else None,
+        ad_group.get("Name") if isinstance(ad_group, dict) else None,
+        normalize_creative_prompt_title(draft_ad.get("title", "")),
+        campaign_name,
+    ) or campaign_name
+    title = first_non_empty_string(draft_ad.get("title"), f"{group_name} | ArtFarfor") or f"{group_name} | ArtFarfor"
+    text = first_non_empty_string(draft_ad.get("text"), f"{group_name} с доставкой по России.") or f"{group_name} с доставкой по России."
+    final_url = first_non_empty_string(draft_ad.get("final_url"), draft_campaign.get("site_url"), ARTFARFOR_BASE_URL) or ARTFARFOR_BASE_URL
+    ad_number = first_non_empty_string(draft_ad.get("ad_id"), draft_ad.get("id"), draft_ad.get("AdId"), f"draft-{ordinal:03d}") or f"draft-{ordinal:03d}"
+
+    return {
+        "ordinal": ordinal,
+        "scope": ad_reference.get("scope"),
+        "ad_group_index": ad_reference.get("ad_group_index"),
+        "ad_index": ad_reference.get("ad_index"),
+        "campaign_name": campaign_name,
+        "group_name": group_name,
+        "title": title,
+        "headline": normalize_creative_prompt_title(title) or group_name,
+        "text": text,
+        "final_url": final_url,
+        "ad_number": str(ad_number),
+    }
+
+
+def build_creative_prompt_theme_candidates(ad_context: dict, requested_theme: Optional[str]) -> list[str]:
+    raw_candidates = [
+        ad_context.get("group_name"),
+        ad_context.get("headline"),
+        requested_theme,
+        ad_context.get("campaign_name"),
+    ]
+    candidates = []
+    seen = set()
+    for raw_candidate in raw_candidates:
+        normalized = normalize_creative_prompt_title(str(raw_candidate)) if raw_candidate is not None else ""
+        normalized = clean_inline_text(normalized)
+        if not normalized:
+            continue
+        dedupe_key = normalize_match_text(normalized)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        candidates.append(normalized)
+    return candidates or ["ArtFarfor"]
+
+
+def select_creative_prompt_image_match(matches: list, used_image_urls: set[str]) -> tuple[Optional[dict], bool]:
+    fallback_match = None
+    for match in matches:
+        if not isinstance(match, dict):
+            continue
+        image_url = normalize_site_image_url(match.get("image_url", ""))
+        if image_url is None:
+            continue
+        if fallback_match is None:
+            fallback_match = match
+        if image_url not in used_image_urls:
+            return match, False
+    return fallback_match, fallback_match is not None
+
+
+def build_creative_prompt_text(ad_context: dict, image_match: Optional[dict]) -> str:
+    headline = ad_context["headline"]
+    subtitle = ad_context["text"]
+    group_name = ad_context["group_name"]
+    campaign_name = ad_context["campaign_name"]
+    ad_number = ad_context["ad_number"]
+    final_url = ad_context["final_url"]
+    source_image_url = image_match.get("image_url") if isinstance(image_match, dict) else ""
+    source_page_url = image_match.get("page_url") if isinstance(image_match, dict) else ""
+    source_title = image_match.get("title") if isinstance(image_match, dict) else ""
+
+    return f"""Создай рекламный креатив 1:1, 1024x1024, в стиле премиальной рекламы коллекционного фарфора Artfarfor.
+
+Используй прикрепленное изображение как главный объект креатива. Сохрани форму, позу, цвета, лицо, одежду, пропорции и художественные детали предмета. Не заменяй товар на похожий и не добавляй другой главный объект.
+
+Тематика объявления: {group_name}.
+Кампания: {campaign_name}.
+Группа: {group_name}.
+Номер объявления: {ad_number}.
+Посадочная страница: {final_url}.
+Источник изображения: {source_image_url or "изображение не найдено автоматически"}.
+Страница товара/категории: {source_page_url or "не определена"}.
+Название найденного изображения/страницы: {source_title or "не определено"}.
+
+Нужно сделать полноценный конверсионный баннер с читаемым рекламным текстом прямо на изображении.
+
+Структура обязательна, от нее не отходить:
+1. Справа крупный товар на красивой поверхности, пьедестале или в премиальном интерьерном окружении.
+2. Слева или слева-сверху чистый светлый текстовый блок.
+3. В текстовом блоке сверху логотип Artfarfor и подпись «Антиквариат и фарфор».
+4. Ниже короткий слоган и тонкие декоративные элементы слева и справа.
+5. Затем главный заголовок крупным читаемым шрифтом: «{headline}».
+6. Затем аккуратный украшающий разделитель.
+7. Затем подзаголовок или основной рекламный текст: «{subtitle}».
+8. Затем три элемента в ряд или вертикальным аккуратным списком: подходящие премиальные иконки и короткие подписи «Статусный подарок», «Коллекционный фарфор», «Доставка по России».
+9. Затем еще один декоративный разделитель.
+10. Внизу рекламный слоган: «Искусство, которое вдохновляет».
+
+Фон: теплая, художественная, премиальная атмосфера, коллекционный фарфор, мягкий cinematic lighting, дорогой интерьер, ощущение редкой вещи. Визуал должен соответствовать смыслу объявления и категории.
+
+Текст должен быть визуально привлекательным, контрастным, аккуратным, премиальным, без орфографических ошибок, без искаженных букв и нечитаемых слов.
+
+Запрещено: водяные знаки, чужие логотипы, интерфейсы, визуальный шум, кислотные цвета, деформация товара, случайные лишние объекты, неверная категория товара, нечитаемый текст, ошибки в словах, обрезанный главный объект."""
+
+
+def build_creative_prompt_pack_archive(
+    draft_campaign: dict,
+    requested_theme: Optional[str] = None,
+    max_ads: Optional[int] = None,
+) -> dict:
+    if not isinstance(draft_campaign, dict):
+        return {"ok": False, "status": 409, "payload": {"status": "error", "message": "draft_campaign is not initialized"}}
+
+    normalize_draft_campaign_images(draft_campaign)
+    ad_references = enumerate_draft_ad_references(draft_campaign)
+    if not ad_references:
+        return {"ok": False, "status": 400, "payload": {"status": "error", "message": "draft_campaign does not contain any ads"}}
+
+    if max_ads is not None:
+        ad_references = ad_references[:max_ads]
+
+    os.makedirs(CREATIVE_PROMPT_PACKS_DIR, exist_ok=True)
+    archive_name = f"creative_prompts_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.zip"
+    archive_path = os.path.join(CREATIVE_PROMPT_PACKS_DIR, archive_name)
+    used_image_urls: set[str] = set()
+    discovery_cache: dict[str, dict] = {}
+    manifest_items = []
+    warnings = []
+
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "README.txt",
+            (
+                "ArtFarfor creative prompt pack\n\n"
+                "prompts/ contains one ChatGPT prompt per draft ad.\n"
+                "images/ contains verified source images downloaded from artfarfor.com or static.insales-cdn.com.\n"
+                "manifest.json links each prompt to its source image, page URL, campaign, ad group and ad index.\n"
+                "No images were generated automatically and nothing was uploaded to Yandex Direct.\n"
+            ),
+        )
+
+        for ordinal, ad_reference in enumerate(ad_references, start=1):
+            draft_ad, resolved_reference = resolve_draft_ad_reference(
+                draft_campaign=draft_campaign,
+                scope=ad_reference["scope"],
+                ad_index=ad_reference["ad_index"],
+                ad_group_index=ad_reference.get("ad_group_index"),
+            )
+            if draft_ad is None or resolved_reference is None:
+                warnings.append({"message": "draft ad not found for reference", "reference": ad_reference})
+                continue
+
+            ad_context = build_creative_prompt_ad_context(
+                draft_campaign=draft_campaign,
+                ad_reference=resolved_reference,
+                draft_ad=draft_ad,
+                ordinal=ordinal,
+            )
+            theme_candidates = build_creative_prompt_theme_candidates(ad_context, requested_theme)
+            selected_match = None
+            selected_theme = None
+            reused_image = False
+
+            for theme_candidate in theme_candidates:
+                cache_key = normalize_match_text(theme_candidate)
+                if cache_key not in discovery_cache:
+                    discovery_cache[cache_key] = find_site_images_for_theme_internal(theme=theme_candidate, limit=12)
+                discovery = discovery_cache[cache_key]
+                if not discovery.get("ok"):
+                    warnings.append(
+                        {
+                            "message": "failed to search site images for theme",
+                            "theme": theme_candidate,
+                            "raw": discovery.get("payload"),
+                        }
+                    )
+                    continue
+                matches = discovery.get("payload", {}).get("matches", [])
+                selected_match, reused_image = select_creative_prompt_image_match(matches, used_image_urls)
+                if selected_match is not None:
+                    selected_theme = theme_candidate
+                    break
+
+            image_file_path = None
+            image_url = None
+            page_url = None
+            image_title = None
+            if selected_match is None:
+                warnings.append(
+                    {
+                        "message": "no verified site image found for draft ad",
+                        "ad": {
+                            "scope": ad_context["scope"],
+                            "ad_group_index": ad_context.get("ad_group_index"),
+                            "ad_index": ad_context.get("ad_index"),
+                            "title": ad_context["title"],
+                        },
+                        "themes": theme_candidates,
+                    }
+                )
+            else:
+                download_result = download_site_image_bytes(selected_match.get("image_url", ""))
+                if not download_result["ok"]:
+                    warnings.append(
+                        {
+                            "message": "failed to download selected site image",
+                            "image_url": selected_match.get("image_url"),
+                            "raw": download_result["payload"],
+                        }
+                    )
+                    selected_match = None
+                else:
+                    image_payload = download_result["payload"]
+                    image_url = image_payload["image_url"]
+                    page_url = selected_match.get("page_url")
+                    image_title = selected_match.get("title")
+                    if reused_image:
+                        warnings.append(
+                            {
+                                "message": "reused image because unique matches were exhausted",
+                                "image_url": image_url,
+                                "ad_index": ad_context.get("ad_index"),
+                                "ad_group_index": ad_context.get("ad_group_index"),
+                            }
+                        )
+                    else:
+                        used_image_urls.add(image_url)
+                    extension = resolve_site_image_file_extension(image_payload.get("filename", ""), image_payload.get("content_type", ""))
+                    image_token = normalize_prompt_pack_filename_token(ad_context["headline"], fallback=f"ad_{ordinal:03d}")
+                    image_file_path = f"images/ad_{ordinal:03d}__{image_token}{extension}"
+                    archive.writestr(image_file_path, image_payload["image_bytes"])
+
+            prompt_text = build_creative_prompt_text(ad_context, selected_match)
+            prompt_token = normalize_prompt_pack_filename_token(ad_context["headline"], fallback=f"ad_{ordinal:03d}")
+            prompt_file_path = f"prompts/ad_{ordinal:03d}__{prompt_token}.txt"
+            archive.writestr(prompt_file_path, prompt_text.encode("utf-8"))
+
+            manifest_items.append(
+                {
+                    "ordinal": ordinal,
+                    "scope": ad_context["scope"],
+                    "ad_group_index": ad_context.get("ad_group_index"),
+                    "ad_index": ad_context.get("ad_index"),
+                    "campaign_name": ad_context["campaign_name"],
+                    "group_name": ad_context["group_name"],
+                    "title": ad_context["title"],
+                    "text": ad_context["text"],
+                    "final_url": ad_context["final_url"],
+                    "ad_number": ad_context["ad_number"],
+                    "matched_theme": selected_theme,
+                    "prompt_file": prompt_file_path,
+                    "image_file": image_file_path,
+                    "image_url": image_url,
+                    "page_url": page_url,
+                    "image_title": image_title,
+                    "reused_image": reused_image,
+                }
+            )
+
+        manifest = {
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "archive_name": archive_name,
+            "requested_theme": requested_theme,
+            "ads_count": len(manifest_items),
+            "images_count": sum(1 for item in manifest_items if item.get("image_file")),
+            "items": manifest_items,
+            "warnings": warnings,
+        }
+        archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
+
+    return {
+        "ok": True,
+        "status": 200,
+        "payload": {
+            "status": "success",
+            "archive_path": archive_path,
+            "archive_name": archive_name,
+            "ads_count": len(manifest_items),
+            "images_count": sum(1 for item in manifest_items if item.get("image_file")),
+            "manifest": manifest,
+            "warnings": warnings,
+        },
+    }
+
+
 def upload_ad_image_via_direct(target: str, name: str, image_data_base64: str) -> dict:
     client = YandexDirectClient.for_target(target)
     try:
@@ -2192,13 +2560,17 @@ def resolve_draft_ad_group_reference(draft_campaign: dict, ad_group_index: int):
 
 
 def build_campaign_payload_from_draft_state(draft_campaign: dict):
+    placement_type = normalize_placement_type(
+        draft_campaign.get("placement_type") or draft_campaign.get("delivery_channel"),
+        default="",
+    )
     payload = {
         "target": "production",
         "campaign_name": draft_campaign.get("campaign_name"),
         "site_url": draft_campaign.get("site_url"),
         "region": draft_campaign.get("region"),
         "language": draft_campaign.get("language"),
-        "placement_type": draft_campaign.get("placement_type"),
+        "placement_type": placement_type or draft_campaign.get("placement_type"),
         "goal_type": draft_campaign.get("goal_type"),
         "strategy_type": draft_campaign.get("strategy_type"),
         "metrica_goal_id": draft_campaign.get("metrica_goal_id"),
@@ -3533,8 +3905,17 @@ def create_draft_structure_in_production_campaign(
 
 
 def extract_current_upc_strategy(campaign: dict) -> dict:
-    bidding_strategy = campaign.get("UnifiedCampaign", {}).get("BiddingStrategy", {})
-    pay_for_conversion = bidding_strategy.get("Search", {}).get("PayForConversion", {})
+    unified_campaign = campaign.get("UnifiedCampaign", {})
+    bidding_strategy = unified_campaign.get("BiddingStrategy", {})
+    placement_type = YandexDirectClient.infer_unified_campaign_placement_type(unified_campaign)
+
+    if placement_type == YandexDirectClient.PLACEMENT_NETWORK_ONLY:
+        pay_for_conversion = bidding_strategy.get("Network", {}).get("PayForConversion", {})
+    else:
+        pay_for_conversion = bidding_strategy.get("Search", {}).get("PayForConversion", {})
+
+    if not pay_for_conversion:
+        pay_for_conversion = bidding_strategy.get("Search", {}).get("PayForConversion", {})
 
     goal_id = pay_for_conversion.get("GoalId")
     cpa_micros = pay_for_conversion.get("Cpa")
@@ -3553,6 +3934,7 @@ def extract_current_upc_strategy(campaign: dict) -> dict:
         "goal_id": goal_id,
         "cpa_micros": cpa_micros,
         "weekly_budget_micros": weekly_budget_micros,
+        "placement_type": placement_type,
     }
 
 
@@ -4213,6 +4595,173 @@ def build_apply_search_term_negatives_response(campaign_id: int, raw_date_from=N
     )
 
 
+
+def build_optimize_campaign_from_search_terms_summary(
+    analysis: Optional[dict],
+    negative_candidates: list[dict],
+    *,
+    applied_negative_keywords: Optional[list[str]] = None,
+    processing: bool = False,
+    mode: str = "preview",
+) -> str:
+    if processing:
+        return "Отчёт по поисковым запросам ещё формируется. Ничего не применено."
+
+    total_queries = 0
+    top_performers = []
+    waste_queries = []
+    candidates_negative = []
+    if isinstance(analysis, dict):
+        total_queries = int(analysis.get("total_queries") or 0)
+        top_performers = analysis.get("top_performers", []) or []
+        waste_queries = analysis.get("waste_queries", []) or []
+        candidates_negative = analysis.get("candidates_negative", []) or []
+
+    if mode == "applied":
+        applied_count = len(applied_negative_keywords or [])
+        if applied_count:
+            examples = ", ".join((applied_negative_keywords or [])[:5])
+            return (
+                f"Найдено {format_rub_value(total_queries)} поисковых запросов. "
+                f"Плохих запросов: {format_rub_value(len(candidates_negative))}. "
+                f"Кандидатов в минус-фразы: {format_rub_value(len(negative_candidates))}. "
+                f"Применено {format_rub_value(applied_count)} минус-фраз. "
+                f"Примеры: {examples}."
+            )
+        return (
+            f"Найдено {format_rub_value(total_queries)} поисковых запросов. "
+            f"Плохих запросов: {format_rub_value(len(candidates_negative))}. "
+            f"Кандидатов в минус-фразы: {format_rub_value(len(negative_candidates))}. "
+            f"Ничего не применено."
+        )
+
+    return (
+        f"Найдено {format_rub_value(total_queries)} поисковых запросов. "
+        f"{format_rub_value(len(waste_queries))} из них сливают бюджет без конверсий. "
+        f"Плохих запросов: {format_rub_value(len(candidates_negative))}. "
+        f"Предлагаю добавить {format_rub_value(len(negative_candidates))} минус-фраз. "
+        f"Подтвердите применение."
+    )
+
+
+def build_optimize_campaign_from_search_terms_response(campaign_id: int, raw_date_from=None, raw_date_to=None, raw_target_cpa=None, confirm: bool = False):
+    target_cpa = None
+    if raw_target_cpa is not None:
+        target_cpa = normalize_positive_number(raw_target_cpa)
+        if target_cpa is None:
+            return {"status": "error", "message": "target_cpa must be a positive number when provided"}, 400
+
+    search_terms_payload, search_terms_status_code = build_search_terms_response(
+        campaign_id=campaign_id,
+        raw_date_from=raw_date_from,
+        raw_date_to=raw_date_to,
+        analyze=True,
+        target_cpa=target_cpa,
+    )
+
+    if search_terms_payload.get("status") == "error":
+        return search_terms_payload, search_terms_status_code
+
+    if search_terms_payload.get("status") == "processing":
+        search_terms_payload["summary"] = build_optimize_campaign_from_search_terms_summary(
+            None,
+            [],
+            processing=True,
+        )
+        return search_terms_payload, search_terms_status_code
+
+    analysis = search_terms_payload.get("analysis", {})
+    rows = search_terms_payload.get("rows", [])
+    negative_candidates = build_negative_preview_candidates(rows, analysis, target_cpa=target_cpa)
+
+    if not confirm:
+        return (
+            {
+                "status": "success",
+                "mode": "preview",
+                "campaign_id": str(campaign_id),
+                "date_from": search_terms_payload.get("date_from", ""),
+                "date_to": search_terms_payload.get("date_to", ""),
+                "analysis": {
+                    "total_queries": analysis.get("total_queries", 0),
+                    "candidates_negative": analysis.get("candidates_negative", []),
+                    "top_performers": analysis.get("top_performers", []),
+                    "waste_queries": analysis.get("waste_queries", []),
+                },
+                "preview": {
+                    "negative_candidates": negative_candidates,
+                    "count": len(negative_candidates),
+                },
+                "summary": build_optimize_campaign_from_search_terms_summary(
+                    analysis,
+                    negative_candidates,
+                    mode="preview",
+                ),
+            },
+            200,
+        )
+
+    campaign_level_negative_keywords: list[str] = []
+    for item in negative_candidates:
+        if not isinstance(item, dict):
+            continue
+        if item.get("level") != "campaign":
+            continue
+        suggested_negative = normalize_non_empty_string(item.get("suggested_negative"))
+        query = normalize_non_empty_string(item.get("query"))
+        if suggested_negative is None:
+            continue
+        if query is not None and normalize_match_text(suggested_negative) == normalize_match_text(query):
+            continue
+        campaign_level_negative_keywords.append(suggested_negative)
+
+    client = YandexDirectClient.for_target("production")
+    sync_result = apply_campaign_negative_keywords_via_shared_set(
+        client=client,
+        campaign_id=campaign_id,
+        negative_keywords=campaign_level_negative_keywords,
+        shared_set_name=f"OpenClaw Search Terms {campaign_id}",
+    )
+    sync_payload = sync_result["payload"]
+
+    return (
+        {
+            "status": "success" if sync_result["ok"] else "error",
+            "mode": "applied",
+            "campaign_id": str(campaign_id),
+            "date_from": search_terms_payload.get("date_from", ""),
+            "date_to": search_terms_payload.get("date_to", ""),
+            "analysis": {
+                "total_queries": analysis.get("total_queries", 0),
+                "candidates_negative": analysis.get("candidates_negative", []),
+                "top_performers": analysis.get("top_performers", []),
+                "waste_queries": analysis.get("waste_queries", []),
+            },
+            "preview": {
+                "negative_candidates": negative_candidates,
+                "count": len(negative_candidates),
+            },
+            "applied": {
+                "negative_keywords": sync_payload.get("applied_negative_keywords", []),
+                "negative_keywords_already_present": sync_payload.get("already_existing_negative_keywords", []),
+                "count": len(sync_payload.get("applied_negative_keywords", [])),
+                "shared_set_action": sync_payload.get("shared_set_action"),
+                "shared_set_id": sync_payload.get("shared_set_id"),
+                "shared_set_ids": sync_payload.get("shared_set_ids", []),
+            },
+            "warnings": sync_payload.get("warnings", []),
+            "errors": sync_payload.get("errors", []),
+            "summary": build_optimize_campaign_from_search_terms_summary(
+                analysis,
+                negative_candidates,
+                applied_negative_keywords=sync_payload.get("applied_negative_keywords", []),
+                mode="applied",
+            ),
+        },
+        sync_result["status"],
+    )
+
+
 def build_campaign_analysis_response(stats_payload: dict, focus: Optional[str] = None) -> dict:
     campaign_id = stats_payload.get("campaign_id")
     date_from = stats_payload.get("date_from")
@@ -4489,6 +5038,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/validate_campaign":
+            if data.get("placement_type") in ("", None) and data.get("delivery_channel") not in ("", None):
+                data["placement_type"] = data.get("delivery_channel")
+            normalized_validate_placement = resolve_placement_type(data)
+            if normalized_validate_placement not in ALLOWED_PLACEMENT_TYPES:
+                self._send_json({"status": "error", "valid": False, "errors": ["placement_type must be 'both', 'search_only', or 'network_only'"]}, 400)
+                return
+            data["placement_type"] = normalized_validate_placement
+
             is_valid, errors = validate_campaign(data)
 
             if is_valid:
@@ -4498,6 +5055,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/create_campaign":
+            if data.get("placement_type") in ("", None) and data.get("delivery_channel") not in ("", None):
+                data["placement_type"] = data.get("delivery_channel")
+            normalized_create_placement = resolve_placement_type(data)
+            if normalized_create_placement not in ALLOWED_PLACEMENT_TYPES:
+                self._send_json({"status": "error", "message": "placement_type must be 'both', 'search_only', or 'network_only'"}, 400)
+                return
+            data["placement_type"] = normalized_create_placement
+
             is_valid, errors = validate_campaign(data)
             if not is_valid:
                 self._send_json({"status": "error", "valid": False, "errors": errors}, 400)
@@ -4510,6 +5075,7 @@ class Handler(BaseHTTPRequestHandler):
 
             confirm = resolve_confirm(data)
             start_date = resolve_start_date(data)
+            placement_type = normalized_create_placement
 
             if target == "production" and not confirm:
                 self._send_json(
@@ -4529,6 +5095,7 @@ class Handler(BaseHTTPRequestHandler):
                         cpa_micros=rub_to_micros(data["target_cpa_rub"]),
                         weekly_budget_micros=rub_to_micros(data["weekly_budget_rub"]),
                         counter_id=DEFAULT_METRICA_COUNTER_ID,
+                        placement_type=placement_type,
                     )
                 else:
                     result = client.add_unified_campaign_production(
@@ -4538,6 +5105,7 @@ class Handler(BaseHTTPRequestHandler):
                         cpa_micros=rub_to_micros(data["target_cpa_rub"]),
                         weekly_budget_micros=rub_to_micros(data["weekly_budget_rub"]),
                         counter_id=DEFAULT_METRICA_COUNTER_ID,
+                        placement_type=placement_type,
                     )
             except YandexDirectClientError as e:
                 self._send_json({"status": "error", "message": str(e), "target": target}, 502)
@@ -4555,11 +5123,19 @@ class Handler(BaseHTTPRequestHandler):
                 "campaign_id": parsed["payload"]["id"],
                 "target": target,
                 "start_date": start_date,
+                "placement_type": placement_type,
                 "data": data,
                 "applied_defaults": {
                     "metrica_counter_id": DEFAULT_METRICA_COUNTER_ID,
+                    "placement_type": placement_type,
                     "search_placement_types": dict(YandexDirectClient.DEFAULT_SEARCH_PLACEMENT_TYPES),
                     "network_placement_types": dict(YandexDirectClient.DEFAULT_NETWORK_PLACEMENT_TYPES),
+                    "bidding_strategy": client.build_unified_bidding_strategy(
+                        goal_id=int(data["metrica_goal_id"]),
+                        cpa_micros=rub_to_micros(data["target_cpa_rub"]),
+                        weekly_budget_micros=rub_to_micros(data["weekly_budget_rub"]),
+                        placement_type=placement_type,
+                    ),
                     "time_targeting_sent": False,
                 },
             }
@@ -4587,8 +5163,14 @@ class Handler(BaseHTTPRequestHandler):
             target_cpa_rub = normalize_positive_number(data.get("target_cpa_rub"))
             weekly_budget_rub = normalize_positive_number(data.get("weekly_budget_rub"))
             metrica_goal_id = normalize_campaign_id(data.get("metrica_goal_id"))
+            placement_update_requested = "placement_type" in data or "delivery_channel" in data
+            requested_placement_type = resolve_placement_type(data, default="")
 
             strategy_update_requested = any(key in data for key in ("target_cpa_rub", "weekly_budget_rub", "metrica_goal_id"))
+
+            if placement_update_requested and requested_placement_type not in ALLOWED_PLACEMENT_TYPES:
+                self._send_json({"status": "error", "message": "placement_type must be 'both', 'search_only', or 'network_only'"}, 400)
+                return
 
             if "target_cpa_rub" in data and target_cpa_rub is None:
                 self._send_json({"status": "error", "message": "target_cpa_rub must be a positive number when provided"}, 400)
@@ -4605,8 +5187,8 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
 
-            if campaign_name is None and not strategy_update_requested:
-                self._send_json({"status": "error", "message": "nothing to update: provide campaign_name and/or strategy fields"}, 400)
+            if campaign_name is None and not strategy_update_requested and not placement_update_requested:
+                self._send_json({"status": "error", "message": "nothing to update: provide campaign_name, placement_type, and/or strategy fields"}, 400)
                 return
 
             confirm = resolve_confirm(data)
@@ -4624,7 +5206,7 @@ class Handler(BaseHTTPRequestHandler):
                 current_cpa_micros = None
                 current_weekly_budget_micros = None
 
-                if strategy_update_requested:
+                if strategy_update_requested or placement_update_requested:
                     current_result = client.get_campaign_details(campaign_id)
                     campaigns = current_result.get("result", {}).get("Campaigns", [])
                     if not campaigns:
@@ -4644,12 +5226,14 @@ class Handler(BaseHTTPRequestHandler):
                     current_goal_id = current_strategy["goal_id"]
                     current_cpa_micros = current_strategy["cpa_micros"]
                     current_weekly_budget_micros = current_strategy["weekly_budget_micros"]
+                    current_placement_type = current_strategy.get("placement_type", "both")
 
                     final_goal_id = metrica_goal_id if metrica_goal_id is not None else current_goal_id
                     final_cpa_rub = target_cpa_rub if target_cpa_rub is not None else micros_to_rub(current_cpa_micros)
                     final_weekly_budget_rub = (
                         weekly_budget_rub if weekly_budget_rub is not None else micros_to_rub(current_weekly_budget_micros)
                     )
+                    final_placement_type = requested_placement_type if placement_update_requested else current_placement_type
 
                     if final_weekly_budget_rub < final_cpa_rub * 20:
                         self._send_json(
@@ -4665,6 +5249,7 @@ class Handler(BaseHTTPRequestHandler):
                             goal_id=final_goal_id,
                             cpa_micros=rub_to_micros(final_cpa_rub),
                             weekly_budget_micros=rub_to_micros(final_weekly_budget_rub),
+                            placement_type=final_placement_type,
                         )
                         if target == "sandbox"
                         else client.update_campaign_production(
@@ -4673,6 +5258,7 @@ class Handler(BaseHTTPRequestHandler):
                             goal_id=final_goal_id,
                             cpa_micros=rub_to_micros(final_cpa_rub),
                             weekly_budget_micros=rub_to_micros(final_weekly_budget_rub),
+                            placement_type=final_placement_type,
                         )
                     )
                 else:
@@ -4708,13 +5294,14 @@ class Handler(BaseHTTPRequestHandler):
             if campaign_name is not None:
                 response_payload["campaign_name"] = campaign_name
 
-            if strategy_update_requested:
+            if strategy_update_requested or placement_update_requested:
                 response_payload["updated_strategy"] = {
                     "metrica_goal_id": metrica_goal_id if metrica_goal_id is not None else current_goal_id,
                     "target_cpa_rub": target_cpa_rub if target_cpa_rub is not None else micros_to_rub(current_cpa_micros),
                     "weekly_budget_rub": (
                         weekly_budget_rub if weekly_budget_rub is not None else micros_to_rub(current_weekly_budget_micros)
                     ),
+                    "placement_type": final_placement_type,
                 }
 
             self._send_json(response_payload, 200)
@@ -5055,6 +5642,7 @@ class Handler(BaseHTTPRequestHandler):
             current_goal_id = current_strategy["goal_id"]
             current_cpa_rub = micros_to_rub(current_strategy["cpa_micros"])
             current_weekly_budget_rub = micros_to_rub(current_strategy["weekly_budget_micros"])
+            current_placement_type = current_strategy.get("placement_type", "both")
 
             final_cpa_rub = target_cpa_rub if target_cpa_rub is not None else current_cpa_rub
             final_weekly_budget_rub = weekly_budget_rub if weekly_budget_rub is not None else current_weekly_budget_rub
@@ -5073,6 +5661,7 @@ class Handler(BaseHTTPRequestHandler):
                     goal_id=current_goal_id,
                     cpa_micros=rub_to_micros(final_cpa_rub),
                     weekly_budget_micros=rub_to_micros(final_weekly_budget_rub),
+                    placement_type=current_placement_type,
                 )
             except YandexDirectClientError as e:
                 self._send_json(
@@ -5103,6 +5692,7 @@ class Handler(BaseHTTPRequestHandler):
                     "target_cpa_rub": format_rub_value(final_cpa_rub),
                     "weekly_budget_rub": format_rub_value(final_weekly_budget_rub),
                     "metrica_goal_id": str(current_goal_id),
+                    "placement_type": current_placement_type,
                 },
                 "result": result,
             }
@@ -5248,6 +5838,75 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(payload, status_code)
             return
 
+
+        if self.path == "/optimize_campaign_from_search_terms":
+            raw_target = data.get("target", "production")
+            target = raw_target.strip().lower() if isinstance(raw_target, str) else ""
+
+            if target != "production":
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": "Search term optimization is enabled only for production; sandbox support is not confirmed",
+                    },
+                    400,
+                )
+                return
+
+            campaign_id = normalize_campaign_id(data.get("campaign_id"))
+            if campaign_id is None:
+                self._send_json({"status": "error", "message": "campaign_id must be a positive integer or numeric string"}, 400)
+                return
+
+            confirm = data.get("confirm", False)
+            if not isinstance(confirm, bool):
+                self._send_json({"status": "error", "message": "confirm must be boolean when provided"}, 400)
+                return
+
+            client = YandexDirectClient.for_target("production")
+            try:
+                current_result = client.get_campaign_details(campaign_id)
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": "production", "campaign_id": str(campaign_id)},
+                    502,
+                )
+                return
+
+            campaigns = current_result.get("result", {}).get("Campaigns", [])
+            if not campaigns:
+                self._send_json(
+                    {"status": "error", "message": "campaign not found", "target": "production", "campaign_id": str(campaign_id), "raw": current_result},
+                    404,
+                )
+                return
+
+            placement_type = YandexDirectClient.infer_unified_campaign_placement_type(
+                campaigns[0].get("UnifiedCampaign", {})
+            )
+            if placement_type == YandexDirectClient.PLACEMENT_NETWORK_ONLY:
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": "search term optimization is only available for search or mixed campaigns",
+                        "target": "production",
+                        "campaign_id": str(campaign_id),
+                        "placement_type": placement_type,
+                    },
+                    400,
+                )
+                return
+
+            payload, status_code = build_optimize_campaign_from_search_terms_response(
+                campaign_id=campaign_id,
+                raw_date_from=data.get("date_from"),
+                raw_date_to=data.get("date_to"),
+                raw_target_cpa=data.get("target_cpa"),
+                confirm=confirm,
+            )
+            self._send_json(payload, status_code)
+            return
+
         if self.path == "/analyze_campaign":
             campaign_id = normalize_campaign_id(data.get("campaign_id"))
             if campaign_id is None:
@@ -5273,6 +5932,75 @@ class Handler(BaseHTTPRequestHandler):
 
             analysis_payload = build_campaign_analysis_response(stats_payload, focus=focus)
             self._send_json(analysis_payload, stats_status_code)
+            return
+
+        if self.path == "/analyze_campaign_bundle":
+            raw_campaign_ids = data.get("campaign_ids")
+            if not isinstance(raw_campaign_ids, dict):
+                self._send_json({"status": "error", "message": "campaign_ids must be an object with search and/or network ids"}, 400)
+                return
+
+            focus = data.get("focus")
+            if focus is not None:
+                if not isinstance(focus, str) or not focus.strip():
+                    self._send_json({"status": "error", "message": "focus must be a non-empty string when provided"}, 400)
+                    return
+                focus = focus.strip().lower()
+
+            bundle_analysis: dict[str, dict] = {}
+            bundle_errors: dict[str, dict] = {}
+            max_status_code = 200
+
+            for channel in ("search", "network"):
+                raw_campaign_id = raw_campaign_ids.get(channel)
+                if raw_campaign_id in ("", None):
+                    continue
+
+                campaign_id = normalize_campaign_id(raw_campaign_id)
+                if campaign_id is None:
+                    bundle_errors[channel] = {
+                        "status": "error",
+                        "message": f"campaign_ids.{channel} must be a positive integer or numeric string",
+                    }
+                    max_status_code = max(max_status_code, 400)
+                    continue
+
+                stats_payload, stats_status_code = build_campaign_stats_response(
+                    campaign_id=campaign_id,
+                    raw_date_from=data.get("date_from"),
+                    raw_date_to=data.get("date_to"),
+                )
+                max_status_code = max(max_status_code, stats_status_code)
+
+                if stats_payload.get("status") == "error":
+                    bundle_errors[channel] = stats_payload
+                    continue
+
+                analysis_payload = build_campaign_analysis_response(stats_payload, focus=focus)
+                analysis_payload["placement_type"] = "search_only" if channel == "search" else "network_only"
+                bundle_analysis[channel] = analysis_payload
+
+            if not bundle_analysis and bundle_errors:
+                self._send_json(
+                    {
+                        "status": "error",
+                        "target": "production",
+                        "analysis": bundle_analysis,
+                        "errors": bundle_errors,
+                    },
+                    max_status_code,
+                )
+                return
+
+            self._send_json(
+                {
+                    "status": "success" if not bundle_errors else "partial_success",
+                    "target": "production",
+                    "analysis": bundle_analysis,
+                    "errors": bundle_errors,
+                },
+                max_status_code,
+            )
             return
 
         if self.path == "/get_campaign_status":
@@ -5306,9 +6034,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             campaign = campaigns[0]
+            placement_type = YandexDirectClient.infer_unified_campaign_placement_type(
+                campaign.get("UnifiedCampaign", {})
+            )
 
             self._send_json(
-                {"status": "success", "target": target, "campaign_id": str(campaign_id), "campaign": campaign},
+                {
+                    "status": "success",
+                    "target": target,
+                    "campaign_id": str(campaign_id),
+                    "placement_type": placement_type,
+                    "campaign": campaign,
+                },
                 200,
             )
             return
@@ -5772,6 +6509,32 @@ class Handler(BaseHTTPRequestHandler):
 
             discovery = find_site_images_for_theme_internal(theme=theme, limit=min(limit, 10))
             self._send_json(discovery["payload"], discovery["status"])
+            return
+
+        if self.path == "/export_draft_ad_creative_prompts":
+            state = deep_copy_json(RUNTIME_STATE)
+            draft_campaign = state.get("draft_campaign")
+            if not isinstance(draft_campaign, dict):
+                self._send_json({"status": "error", "message": "draft_campaign is not initialized"}, 409)
+                return
+
+            requested_theme = normalize_non_empty_string(data.get("theme"))
+            max_ads = None
+            if "max_ads" in data:
+                max_ads = normalize_non_negative_int(data.get("max_ads"))
+                if max_ads is None or max_ads <= 0:
+                    self._send_json({"status": "error", "message": "max_ads must be a positive integer when provided"}, 400)
+                    return
+                if max_ads > 128:
+                    self._send_json({"status": "error", "message": "max_ads must be 128 or less"}, 400)
+                    return
+
+            result = build_creative_prompt_pack_archive(
+                draft_campaign=draft_campaign,
+                requested_theme=requested_theme,
+                max_ads=max_ads,
+            )
+            self._send_json(result["payload"], result["status"])
             return
 
         if self.path == "/apply_site_image_to_draft_ad":
@@ -6832,6 +7595,125 @@ class Handler(BaseHTTPRequestHandler):
                 )
             return
 
+        if self.path == "/create_split_campaigns_from_draft":
+            target = resolve_target(data)
+            if target != "production":
+                self._send_json({"status": "error", "message": "target must be 'production' for split draft create flow"}, 400)
+                return
+
+            confirm = resolve_confirm(data)
+            if not confirm:
+                self._send_json(
+                    {"status": "error", "message": "production split draft create requires explicit confirm=true", "target": "production"},
+                    400,
+                )
+                return
+
+            state = deep_copy_json(RUNTIME_STATE)
+            if state.get("session_mode") != "awaiting_confirm_create":
+                self._send_json(
+                    {"status": "error", "message": "session_mode must be awaiting_confirm_create before split draft create"},
+                    409,
+                )
+                return
+
+            draft_campaign = state.get("draft_campaign")
+            if not isinstance(draft_campaign, dict):
+                self._send_json({"status": "error", "message": "draft_campaign is not initialized"}, 409)
+                return
+
+            campaign_payload, missing_fields = build_campaign_payload_from_draft_state(draft_campaign)
+            if missing_fields:
+                self._send_json({"status": "error", "missing_fields": missing_fields}, 400)
+                return
+
+            is_valid, errors = validate_campaign({**campaign_payload, "placement_type": "both"})
+            state["campaign_payload"] = campaign_payload
+            state["validation_result"] = {"valid": is_valid, "errors": errors}
+            if not is_valid:
+                save_runtime_state(state)
+                self._send_json({"status": "error", "valid": False, "errors": errors}, 400)
+                return
+
+            start_date = resolve_start_date(campaign_payload)
+            base_name = normalize_non_empty_string(campaign_payload.get("campaign_name")) or "OpenClaw Campaign"
+            client = YandexDirectClient.for_target("production")
+            created_campaigns: dict[str, dict] = {}
+            created_ids: dict[str, str] = {}
+            warnings: list[str] = []
+
+            for channel, suffix in (
+                ("search", "Search"),
+                ("network", "RSYA"),
+            ):
+                placement_type = "search_only" if channel == "search" else "network_only"
+                try:
+                    result = client.add_unified_campaign_production(
+                        name=f"{base_name} | {suffix}",
+                        start_date=start_date,
+                        goal_id=int(campaign_payload["metrica_goal_id"]),
+                        cpa_micros=rub_to_micros(campaign_payload["target_cpa_rub"]),
+                        weekly_budget_micros=rub_to_micros(campaign_payload["weekly_budget_rub"]),
+                        counter_id=DEFAULT_METRICA_COUNTER_ID,
+                        placement_type=placement_type,
+                    )
+                except YandexDirectClientError as e:
+                    self._send_json(
+                        {
+                            "status": "error",
+                            "message": str(e),
+                            "target": "production",
+                            "created_campaigns": created_campaigns,
+                            "warnings": warnings,
+                        },
+                        502,
+                    )
+                    return
+
+                parsed = parse_add_result(result, "campaign")
+                if not parsed["ok"]:
+                    payload = parsed["payload"]
+                    payload["target"] = "production"
+                    payload["placement_type"] = placement_type
+                    payload["created_campaigns"] = created_campaigns
+                    self._send_json(payload, parsed["status"])
+                    return
+
+                created_id = parsed["payload"]["id"]
+                created_ids[channel] = created_id
+                created_campaigns[channel] = {
+                    "campaign_id": created_id,
+                    "placement_type": placement_type,
+                    "campaign_name": f"{base_name} | {suffix}",
+                    "warnings": parsed["payload"].get("warnings", []),
+                }
+
+            state["created_campaign_id"] = created_ids.get("search")
+            state["created_campaign_ids"] = created_ids
+            state["session_mode"] = "draft_campaign"
+            state["draft_meta"]["last_action"] = "create_split_campaigns_from_draft"
+            save_runtime_state(state)
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "target": "production",
+                    "start_date": start_date,
+                    "campaign_ids": created_ids,
+                    "created_campaigns": created_campaigns,
+                    "campaign_payload": campaign_payload,
+                    "warnings": warnings,
+                    "applied_defaults": {
+                        "metrica_counter_id": DEFAULT_METRICA_COUNTER_ID,
+                        "search_placement_types": dict(YandexDirectClient.DEFAULT_SEARCH_PLACEMENT_TYPES),
+                        "network_placement_types": dict(YandexDirectClient.DEFAULT_NETWORK_PLACEMENT_TYPES),
+                        "time_targeting_sent": False,
+                    },
+                },
+                200,
+            )
+            return
+
         if self.path == "/create_campaign_from_draft":
             target = resolve_target(data)
             if target != "production":
@@ -6873,6 +7755,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             start_date = resolve_start_date(campaign_payload)
+            placement_type = resolve_placement_type(campaign_payload)
+            if placement_type not in ALLOWED_PLACEMENT_TYPES:
+                self._send_json({"status": "error", "message": "placement_type must be 'both', 'search_only', or 'network_only'"}, 400)
+                return
+
             client = YandexDirectClient.for_target("production")
 
             try:
@@ -6883,6 +7770,7 @@ class Handler(BaseHTTPRequestHandler):
                     cpa_micros=rub_to_micros(campaign_payload["target_cpa_rub"]),
                     weekly_budget_micros=rub_to_micros(campaign_payload["weekly_budget_rub"]),
                     counter_id=DEFAULT_METRICA_COUNTER_ID,
+                    placement_type=placement_type,
                 )
             except YandexDirectClientError as e:
                 self._send_json({"status": "error", "message": str(e), "target": "production"}, 502)
@@ -6906,11 +7794,19 @@ class Handler(BaseHTTPRequestHandler):
                     "campaign_id": parsed["payload"]["id"],
                     "target": "production",
                     "start_date": start_date,
+                    "placement_type": placement_type,
                     "campaign_payload": campaign_payload,
                     "applied_defaults": {
                         "metrica_counter_id": DEFAULT_METRICA_COUNTER_ID,
+                        "placement_type": placement_type,
                         "search_placement_types": dict(YandexDirectClient.DEFAULT_SEARCH_PLACEMENT_TYPES),
                         "network_placement_types": dict(YandexDirectClient.DEFAULT_NETWORK_PLACEMENT_TYPES),
+                        "bidding_strategy": client.build_unified_bidding_strategy(
+                            goal_id=int(campaign_payload["metrica_goal_id"]),
+                            cpa_micros=rub_to_micros(campaign_payload["target_cpa_rub"]),
+                            weekly_budget_micros=rub_to_micros(campaign_payload["weekly_budget_rub"]),
+                            placement_type=placement_type,
+                        ),
                         "time_targeting_sent": False,
                     },
                 },

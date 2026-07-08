@@ -5,8 +5,8 @@ ALLOWED_SITE = "https://artfarfor.com"
 ALLOWED_LANGUAGE = "RU"
 ALLOWED_GOALS = {"leads", "sales"}
 
-# На этом этапе поддерживаем только search + network
-ALLOWED_PLACEMENTS = {"both"}
+# Unified campaign delivery channels supported by backend create/update flow.
+ALLOWED_PLACEMENTS = {"both", "search_only", "network_only"}
 
 # Новое жёсткое правило:
 # только стратегия с оплатой за конверсии
@@ -51,7 +51,7 @@ def validate_campaign(data: Dict) -> Tuple[bool, List[str]]:
 
     placement_type = data.get("placement_type")
     if placement_type and placement_type not in ALLOWED_PLACEMENTS:
-        errors.append("placement_type must be 'both'")
+        errors.append("placement_type must be 'both', 'search_only', or 'network_only'")
 
     goal_type = data.get("goal_type")
     if goal_type and goal_type not in ALLOWED_GOALS:
