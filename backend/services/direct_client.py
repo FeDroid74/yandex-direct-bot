@@ -903,6 +903,7 @@ class YandexDirectClient:
                 ],
                 "TextAdFieldNames": [
                     "Title",
+                    "Title2",
                     "Text",
                     "Href",
                     "DisplayUrlPath",
@@ -978,6 +979,7 @@ class YandexDirectClient:
                 ],
                 "TextAdFieldNames": [
                     "Title",
+                    "Title2",
                     "Text",
                     "Href",
                     "DisplayUrlPath",
@@ -1405,6 +1407,7 @@ class YandexDirectClient:
         title: str,
         text: str,
         href: str,
+        title2: Optional[str] = None,
         display_url_path: Optional[str] = None,
         ad_image_hash: Optional[str] = None,
         sitelink_set_id: Optional[int] = None,
@@ -1418,6 +1421,9 @@ class YandexDirectClient:
             },
         }
 
+        if title2:
+            ad_item["TextAd"]["Title2"] = title2
+
         if display_url_path:
             ad_item["TextAd"]["DisplayUrlPath"] = display_url_path
 
@@ -1426,10 +1432,6 @@ class YandexDirectClient:
 
         if sitelink_set_id is not None:
             ad_item["TextAd"]["SitelinkSetId"] = sitelink_set_id
-
-        print("DEBUG ADS PARAMS:", json.dumps({
-            "Ads": [ad_item],
-        }, ensure_ascii=False, indent=2))
 
         response = self.call_v501(
             service="ads",
@@ -1446,6 +1448,7 @@ class YandexDirectClient:
         title: str,
         text: str,
         href: str,
+        title2: Optional[str] = None,
         display_url_path: Optional[str] = None,
         ad_image_hash: Optional[str] = None,
         sitelink_set_id: Optional[int] = None,
@@ -1455,6 +1458,7 @@ class YandexDirectClient:
             title=title,
             text=text,
             href=href,
+            title2=title2,
             display_url_path=display_url_path,
             ad_image_hash=ad_image_hash,
             sitelink_set_id=sitelink_set_id,
@@ -1466,6 +1470,7 @@ class YandexDirectClient:
         title: str,
         text: str,
         href: str,
+        title2: Optional[str] = None,
         display_url_path: Optional[str] = None,
         ad_image_hash: Optional[str] = None,
         sitelink_set_id: Optional[int] = None,
@@ -1475,6 +1480,7 @@ class YandexDirectClient:
             title=title,
             text=text,
             href=href,
+            title2=title2,
             display_url_path=display_url_path,
             ad_image_hash=ad_image_hash,
             sitelink_set_id=sitelink_set_id,
@@ -1522,6 +1528,42 @@ class YandexDirectClient:
                         "TextAd": {
                             "SitelinkSetId": sitelink_set_id,
                         },
+                    }
+                ],
+            },
+        )
+        return response.body
+
+    def update_text_ad_content(
+        self,
+        ad_id: int,
+        title: Optional[str] = None,
+        text: Optional[str] = None,
+        href: Optional[str] = None,
+        title2: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        text_ad: Dict[str, Any] = {}
+
+        if title is not None:
+            text_ad["Title"] = title
+        if title2 is not None:
+            text_ad["Title2"] = title2
+        if text is not None:
+            text_ad["Text"] = text
+        if href is not None:
+            text_ad["Href"] = href
+
+        if not text_ad:
+            raise YandexDirectClientError("at least one text ad content field must be provided")
+
+        response = self.call_v501(
+            service="ads",
+            method="update",
+            params={
+                "Ads": [
+                    {
+                        "Id": ad_id,
+                        "TextAd": text_ad,
                     }
                 ],
             },

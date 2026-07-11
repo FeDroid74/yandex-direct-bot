@@ -48,6 +48,10 @@ DEFAULT_COMPETITOR_ANALYSIS_URLS = [
 ]
 ALLOWED_COMPETITOR_DOMAINS = {"farforts.ru", "starivina.ru", "kunstgalerie.ru"}
 DEFAULT_SITE_IMAGE_LIMIT = 3
+MAX_DRAFT_TEXT_AD_TITLES = 7
+MAX_DRAFT_TEXT_AD_TEXTS = 3
+DIRECT_TEXT_AD_SUPPORTED_TITLES = 2
+DIRECT_TEXT_AD_SUPPORTED_TEXTS = 1
 MAX_SITE_DISCOVERY_PAGES = 18
 MAX_SITE_LINKS_PER_PAGE = 20
 MAX_COMPETITOR_ANALYSIS_PAGES = 16
@@ -541,14 +545,19 @@ def merge_autotargeting_settings(base_settings: dict, override_settings: dict) -
 
 def build_ad_group_draft(name: str) -> dict:
     group_name = name.strip()
+    title = f"{group_name} | ArtFarfor"
+    text = "Авторские фарфоровые статуэтки и подарки ручной работы"
     return {
         "group_name": group_name,
         "negative_keywords": [],
         "autotargeting_settings": build_default_draft_autotargeting_settings(),
         "ads": [
             {
-                "title": f"{group_name} | ArtFarfor",
-                "text": "Авторские фарфоровые статуэтки и подарки ручной работы",
+                "title": title,
+                "title2": build_default_text_ad_titles(group_name, title)[1],
+                "titles": build_default_text_ad_titles(group_name, title),
+                "text": text,
+                "texts": build_default_text_ad_texts(group_name, text),
                 "final_url": "https://artfarfor.com",
                 "ad_image_hash": None,
                 "ad_image_hashes": [],
@@ -561,9 +570,13 @@ def build_ad_group_draft(name: str) -> dict:
 def build_draft_ad_fragment(title_seed: str, text: str) -> dict:
     normalized_title_seed = title_seed.strip()
     normalized_text = text.strip()
+    title = f"{normalized_title_seed} | ArtFarfor"
     return {
-        "title": f"{normalized_title_seed} | ArtFarfor",
+        "title": title,
+        "title2": build_default_text_ad_titles(normalized_title_seed, title)[1],
+        "titles": build_default_text_ad_titles(normalized_title_seed, title),
         "text": normalized_text,
+        "texts": build_default_text_ad_texts(normalized_title_seed, normalized_text),
         "final_url": "https://artfarfor.com",
         "ad_image_hash": None,
         "ad_image_hashes": [],
@@ -682,6 +695,8 @@ def build_rebuild_draft_campaign(theme: str, ad_groups_count: int = 4, ads_per_g
 
 def build_draft_campaign_from_theme(theme: str) -> dict:
     normalized_theme = theme.strip()
+    campaign_ad_title = f"{normalized_theme} | ArtFarfor"
+    campaign_ad_text = "Подарочные фарфоровые статуэтки ручной работы"
     return {
         "campaign_type": "UNIFIED_CAMPAIGN",
         "campaign_name": f"{normalized_theme} | ArtFarfor",
@@ -713,8 +728,11 @@ def build_draft_campaign_from_theme(theme: str) -> dict:
         ],
         "ads": [
             {
-                "title": f"{normalized_theme} | ArtFarfor",
-                "text": "Подарочные фарфоровые статуэтки ручной работы",
+                "title": campaign_ad_title,
+                "title2": build_default_text_ad_titles(normalized_theme, campaign_ad_title)[1],
+                "titles": build_default_text_ad_titles(normalized_theme, campaign_ad_title),
+                "text": campaign_ad_text,
+                "texts": build_default_text_ad_texts(normalized_theme, campaign_ad_text),
                 "final_url": "https://artfarfor.com",
                 "ad_image_hash": None,
                 "ad_image_hashes": [],
@@ -1107,6 +1125,124 @@ def clean_inline_text(value) -> str:
     if not isinstance(value, str):
         return ""
     return re.sub(r"\s+", " ", value.replace("\xa0", " ")).strip()
+
+
+def normalize_text_ad_variant_list(raw_values, primary_value: Optional[str], limit: int) -> list[str]:
+    values: list[str] = []
+    seen = set()
+
+    def add_value(raw_value) -> None:
+        normalized = clean_inline_text(raw_value)
+        if not normalized:
+            return
+        dedupe_key = normalize_match_text(normalized)
+        if dedupe_key in seen:
+            return
+        seen.add(dedupe_key)
+        values.append(normalized)
+
+    add_value(primary_value)
+
+    if isinstance(raw_values, list):
+        for raw_value in raw_values:
+            add_value(raw_value)
+    elif isinstance(raw_values, str):
+        add_value(raw_values)
+
+    return values[:limit]
+
+
+def insert_text_ad_variant(values: list[str], raw_value, index: int, limit: int) -> list[str]:
+    normalized = clean_inline_text(raw_value)
+    if not normalized:
+        return values[:limit]
+
+    dedupe_key = normalize_match_text(normalized)
+    filtered = [value for value in values if normalize_match_text(value) != dedupe_key]
+    insert_at = min(max(index, 0), len(filtered))
+    filtered.insert(insert_at, normalized)
+    return filtered[:limit]
+
+
+def build_default_text_ad_titles(title_seed: str, primary_title: Optional[str] = None) -> list[str]:
+    normalized_seed = clean_inline_text(title_seed) or "ArtFarfor"
+    normalized_seed = re.sub(r"\s*\|\s*ArtFarfor\s*$", "", normalized_seed, flags=re.IGNORECASE).strip(" -|")
+    primary = clean_inline_text(primary_title) or f"{normalized_seed} | ArtFarfor"
+
+    return normalize_text_ad_variant_list(
+        [
+            primary,
+            f"{normalized_seed} в ArtFarfor",
+            "Коллекционный фарфор",
+            "Редкие статуэтки",
+            "Подарки из фарфора",
+            "Доставка по России",
+            "Антиквариат и фарфор",
+        ],
+        primary,
+        MAX_DRAFT_TEXT_AD_TITLES,
+    )
+
+
+def build_default_text_ad_texts(theme: str, primary_text: Optional[str] = None) -> list[str]:
+    normalized_theme = clean_inline_text(theme) or "фарфор ArtFarfor"
+    primary = clean_inline_text(primary_text) or f"{normalized_theme} с доставкой по России."
+
+    return normalize_text_ad_variant_list(
+        [
+            primary,
+            "Редкие статуэтки и фарфор для коллекции, интерьера и подарка.",
+            "Выберите коллекционный фарфор ArtFarfor с доставкой по России.",
+        ],
+        primary,
+        MAX_DRAFT_TEXT_AD_TEXTS,
+    )
+
+
+def extract_text_ad_titles(ad: dict) -> list[str]:
+    if not isinstance(ad, dict):
+        return []
+
+    titles = normalize_text_ad_variant_list(
+        ad.get("titles"),
+        normalize_non_empty_string(ad.get("title")),
+        MAX_DRAFT_TEXT_AD_TITLES,
+    )
+    title2 = normalize_non_empty_string(ad.get("title2"))
+    if title2 is not None:
+        titles = insert_text_ad_variant(titles, title2, 1, MAX_DRAFT_TEXT_AD_TITLES)
+
+    return titles
+
+
+def extract_text_ad_texts(ad: dict) -> list[str]:
+    if not isinstance(ad, dict):
+        return []
+
+    return normalize_text_ad_variant_list(
+        ad.get("texts"),
+        normalize_non_empty_string(ad.get("text")),
+        MAX_DRAFT_TEXT_AD_TEXTS,
+    )
+
+
+def apply_text_ad_variants_to_draft_ad(ad: dict, titles: Optional[list[str]] = None, texts: Optional[list[str]] = None) -> dict:
+    if not isinstance(ad, dict):
+        return ad
+
+    normalized_titles = normalize_text_ad_variant_list(titles, None, MAX_DRAFT_TEXT_AD_TITLES) if titles is not None else extract_text_ad_titles(ad)
+    normalized_texts = normalize_text_ad_variant_list(texts, None, MAX_DRAFT_TEXT_AD_TEXTS) if texts is not None else extract_text_ad_texts(ad)
+
+    if normalized_titles:
+        ad["title"] = normalized_titles[0]
+        ad["title2"] = normalized_titles[1] if len(normalized_titles) > 1 else None
+        ad["titles"] = normalized_titles
+
+    if normalized_texts:
+        ad["text"] = normalized_texts[0]
+        ad["texts"] = normalized_texts
+
+    return ad
 
 
 def normalize_match_text(value) -> str:
@@ -2010,6 +2146,8 @@ def build_creative_prompt_ad_context(
     ) or campaign_name
     title = first_non_empty_string(draft_ad.get("title"), f"{group_name} | ArtFarfor") or f"{group_name} | ArtFarfor"
     text = first_non_empty_string(draft_ad.get("text"), f"{group_name} с доставкой по России.") or f"{group_name} с доставкой по России."
+    titles = extract_text_ad_titles(draft_ad) or [title]
+    texts = extract_text_ad_texts(draft_ad) or [text]
     final_url = first_non_empty_string(draft_ad.get("final_url"), draft_campaign.get("site_url"), ARTFARFOR_BASE_URL) or ARTFARFOR_BASE_URL
     ad_number = first_non_empty_string(draft_ad.get("ad_id"), draft_ad.get("id"), draft_ad.get("AdId"), f"draft-{ordinal:03d}") or f"draft-{ordinal:03d}"
 
@@ -2021,25 +2159,53 @@ def build_creative_prompt_ad_context(
         "campaign_name": campaign_name,
         "group_name": group_name,
         "title": title,
+        "title2": titles[1] if len(titles) > 1 else None,
+        "titles": titles[:MAX_DRAFT_TEXT_AD_TITLES],
         "headline": normalize_creative_prompt_title(title) or group_name,
         "text": text,
+        "texts": texts[:MAX_DRAFT_TEXT_AD_TEXTS],
         "final_url": final_url,
         "ad_number": str(ad_number),
     }
 
 
+CREATIVE_PROMPT_TECHNICAL_THEME_KEYS = {"поиск", "рся", "search", "network"}
+
+
+def normalize_creative_prompt_theme_candidate(value) -> str:
+    normalized = clean_inline_text(str(value)) if value is not None else ""
+    if not normalized:
+        return ""
+
+    if "|" in normalized:
+        parts = [clean_inline_text(part) for part in normalized.split("|")]
+        useful_parts = [
+            part
+            for part in parts
+            if part and normalize_match_text(part) not in CREATIVE_PROMPT_TECHNICAL_THEME_KEYS
+        ]
+        if useful_parts:
+            normalized = " ".join(useful_parts)
+
+    normalized = normalize_creative_prompt_title(normalized)
+    if normalize_match_text(normalized) in CREATIVE_PROMPT_TECHNICAL_THEME_KEYS:
+        return ""
+
+    return normalized
+
+
 def build_creative_prompt_theme_candidates(ad_context: dict, requested_theme: Optional[str]) -> list[str]:
     raw_candidates = [
+        requested_theme,
         ad_context.get("group_name"),
         ad_context.get("headline"),
-        requested_theme,
         ad_context.get("campaign_name"),
+        "ArtFarfor фарфор",
     ]
     candidates = []
     seen = set()
     for raw_candidate in raw_candidates:
-        normalized = normalize_creative_prompt_title(str(raw_candidate)) if raw_candidate is not None else ""
-        normalized = clean_inline_text(normalized)
+        normalized = normalize_creative_prompt_theme_candidate(raw_candidate)
         if not normalized:
             continue
         dedupe_key = normalize_match_text(normalized)
@@ -2068,6 +2234,8 @@ def select_creative_prompt_image_match(matches: list, used_image_urls: set[str])
 def build_creative_prompt_text(ad_context: dict, image_match: Optional[dict]) -> str:
     headline = ad_context["headline"]
     subtitle = ad_context["text"]
+    additional_titles = [title for title in ad_context.get("titles", [])[1:] if title]
+    additional_texts = [text for text in ad_context.get("texts", [])[1:] if text]
     group_name = ad_context["group_name"]
     campaign_name = ad_context["campaign_name"]
     ad_number = ad_context["ad_number"]
@@ -2088,6 +2256,8 @@ def build_creative_prompt_text(ad_context: dict, image_match: Optional[dict]) ->
 Источник изображения: {source_image_url or "изображение не найдено автоматически"}.
 Страница товара/категории: {source_page_url or "не определена"}.
 Название найденного изображения/страницы: {source_title or "не определено"}.
+Дополнительные варианты заголовков для объявления: {("; ".join(additional_titles)) if additional_titles else "не заданы"}.
+Дополнительные варианты текстов объявления: {("; ".join(additional_texts)) if additional_texts else "не заданы"}.
 
 Нужно сделать полноценный конверсионный баннер с читаемым рекламным текстом прямо на изображении.
 
@@ -2114,6 +2284,7 @@ def build_creative_prompt_pack_archive(
     draft_campaign: dict,
     requested_theme: Optional[str] = None,
     max_ads: Optional[int] = None,
+    initial_warnings: Optional[list] = None,
 ) -> dict:
     if not isinstance(draft_campaign, dict):
         return {"ok": False, "status": 409, "payload": {"status": "error", "message": "draft_campaign is not initialized"}}
@@ -2132,7 +2303,7 @@ def build_creative_prompt_pack_archive(
     used_image_urls: set[str] = set()
     discovery_cache: dict[str, dict] = {}
     manifest_items = []
-    warnings = []
+    warnings = list(initial_warnings or [])
 
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(
@@ -2251,7 +2422,10 @@ def build_creative_prompt_pack_archive(
                     "campaign_name": ad_context["campaign_name"],
                     "group_name": ad_context["group_name"],
                     "title": ad_context["title"],
+                    "title2": ad_context.get("title2"),
+                    "titles": ad_context.get("titles", []),
                     "text": ad_context["text"],
+                    "texts": ad_context.get("texts", []),
                     "final_url": ad_context["final_url"],
                     "ad_number": ad_context["ad_number"],
                     "matched_theme": selected_theme,
@@ -2286,6 +2460,318 @@ def build_creative_prompt_pack_archive(
             "images_count": sum(1 for item in manifest_items if item.get("image_file")),
             "manifest": manifest,
             "warnings": warnings,
+        },
+    }
+
+
+def build_draft_campaign_from_direct_entities(
+    campaign: dict,
+    ad_groups: list,
+    ads_by_ad_group_id: dict[int, list],
+) -> dict:
+    campaign_name = first_non_empty_string(campaign.get("Name"), campaign.get("name"), "ArtFarfor") or "ArtFarfor"
+    draft_ad_groups = []
+
+    for raw_ad_group in ad_groups:
+        if not isinstance(raw_ad_group, dict):
+            continue
+
+        ad_group_id = normalize_ad_group_id(raw_ad_group.get("Id") or raw_ad_group.get("id"))
+        if ad_group_id is None:
+            continue
+
+        group_name = first_non_empty_string(
+            raw_ad_group.get("Name"),
+            raw_ad_group.get("name"),
+            campaign_name,
+        ) or campaign_name
+        draft_ads = []
+
+        for raw_ad in ads_by_ad_group_id.get(ad_group_id, []):
+            if not isinstance(raw_ad, dict):
+                continue
+
+            text_ad = raw_ad.get("TextAd")
+            if not isinstance(text_ad, dict):
+                text_ad = {}
+
+            ad_id = normalize_ad_id(raw_ad.get("Id") or raw_ad.get("id"))
+            title = first_non_empty_string(
+                text_ad.get("Title"),
+                raw_ad.get("title"),
+                group_name,
+                campaign_name,
+            ) or campaign_name
+            text = first_non_empty_string(
+                text_ad.get("Text"),
+                raw_ad.get("text"),
+                f"{normalize_creative_prompt_title(title) or group_name} с доставкой по России.",
+            ) or f"{group_name} с доставкой по России."
+            title2 = first_non_empty_string(text_ad.get("Title2"), raw_ad.get("title2"))
+            final_url = first_non_empty_string(
+                text_ad.get("Href"),
+                raw_ad.get("href"),
+                ARTFARFOR_BASE_URL,
+            ) or ARTFARFOR_BASE_URL
+
+            draft_ad = {
+                "title": title,
+                "title2": title2,
+                "text": text,
+                "final_url": final_url,
+                "ad_id": str(ad_id) if ad_id is not None else None,
+            }
+            apply_text_ad_variants_to_draft_ad(
+                draft_ad,
+                titles=[title, *([title2] if title2 is not None else [])],
+                texts=[text],
+            )
+
+            ad_image_hash = normalize_non_empty_string(text_ad.get("AdImageHash") or raw_ad.get("ad_image_hash"))
+            if ad_image_hash is not None:
+                draft_ad["ad_image_hash"] = ad_image_hash
+                draft_ad["ad_image_hashes"] = [ad_image_hash]
+
+            draft_ads.append(draft_ad)
+
+        if not draft_ads:
+            continue
+
+        draft_ad_groups.append(
+            {
+                "group_id": str(ad_group_id),
+                "group_name": group_name,
+                "name": group_name,
+                "ads": draft_ads,
+            }
+        )
+
+    return {
+        "campaign_id": str(campaign.get("Id") or campaign.get("id") or ""),
+        "campaign_name": campaign_name,
+        "name": campaign_name,
+        "site_url": ARTFARFOR_BASE_URL,
+        "ad_groups": draft_ad_groups,
+    }
+
+
+def collect_direct_campaign_for_creative_prompts(client: YandexDirectClient, campaign_id: int, target: str) -> dict:
+    try:
+        campaign_result = client.get_campaign_details(campaign_id)
+    except YandexDirectClientError as e:
+        return {"ok": False, "status": 502, "payload": {"status": "error", "message": str(e), "target": target, "campaign_id": str(campaign_id)}}
+
+    campaigns = campaign_result.get("result", {}).get("Campaigns", [])
+    if not campaigns:
+        return {
+            "ok": False,
+            "status": 404,
+            "payload": {
+                "status": "error",
+                "message": "campaign not found",
+                "target": target,
+                "campaign_id": str(campaign_id),
+                "raw": campaign_result,
+            },
+        }
+
+    try:
+        ad_groups_result = client.list_ad_groups(campaign_id)
+    except YandexDirectClientError as e:
+        return {"ok": False, "status": 502, "payload": {"status": "error", "message": str(e), "target": target, "campaign_id": str(campaign_id)}}
+
+    ad_groups = ad_groups_result.get("result", {}).get("AdGroups", [])
+    ads_by_ad_group_id: dict[int, list] = {}
+    warnings = []
+
+    for raw_ad_group in ad_groups:
+        if not isinstance(raw_ad_group, dict):
+            continue
+
+        ad_group_id = normalize_ad_group_id(raw_ad_group.get("Id"))
+        if ad_group_id is None:
+            continue
+
+        try:
+            ads_result = client.list_ads(ad_group_id)
+        except YandexDirectClientError as e:
+            warnings.append(f"Could not list ads for ad_group {ad_group_id}: {str(e)}")
+            continue
+
+        raw_ads = ads_result.get("result", {}).get("Ads", [])
+        if isinstance(raw_ads, list):
+            ads_by_ad_group_id[ad_group_id] = raw_ads
+        else:
+            warnings.append(f"Invalid ads response for ad_group {ad_group_id}.")
+
+    draft_campaign = build_draft_campaign_from_direct_entities(
+        campaign=campaigns[0],
+        ad_groups=ad_groups,
+        ads_by_ad_group_id=ads_by_ad_group_id,
+    )
+
+    if not enumerate_draft_ad_references(draft_campaign):
+        return {
+            "ok": False,
+            "status": 400,
+            "payload": {
+                "status": "error",
+                "message": "campaign does not contain any text ads available for creative prompt export",
+                "target": target,
+                "campaign_id": str(campaign_id),
+                "warnings": warnings,
+            },
+        }
+
+    return {
+        "ok": True,
+        "status": 200,
+        "payload": {
+            "campaign": campaigns[0],
+            "ad_groups": ad_groups,
+            "draft_campaign": draft_campaign,
+            "warnings": warnings,
+        },
+    }
+
+
+def normalize_keyword_text_for_direct(value) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+
+    normalized = clean_inline_text(value)
+    if not normalized or normalized == "---autotargeting":
+        return None
+
+    return normalized
+
+
+def build_keywords_add_preview(
+    raw_items,
+    existing_keywords_by_ad_group_id: Optional[dict[int, list[str]]] = None,
+) -> dict:
+    if not isinstance(raw_items, list) or not raw_items:
+        return {
+            "ok": False,
+            "status": 400,
+            "payload": {
+                "status": "error",
+                "message": "items must be a non-empty array of {ad_group_id, keywords}",
+            },
+        }
+
+    existing_keywords = existing_keywords_by_ad_group_id or {}
+    prepared_keywords = []
+    skipped_duplicates = []
+    seen_payload_keys = set()
+
+    for item in raw_items:
+        if not isinstance(item, dict):
+            return {"ok": False, "status": 400, "payload": {"status": "error", "message": "each item must be an object"}}
+
+        ad_group_id = normalize_ad_group_id(item.get("ad_group_id") or item.get("AdGroupId"))
+        if ad_group_id is None:
+            return {
+                "ok": False,
+                "status": 400,
+                "payload": {"status": "error", "message": "each item.ad_group_id must be a positive integer or numeric string"},
+            }
+
+        raw_keywords = item.get("keywords") or item.get("Keywords")
+        if not isinstance(raw_keywords, list) or not raw_keywords:
+            return {
+                "ok": False,
+                "status": 400,
+                "payload": {"status": "error", "message": "each item.keywords must be a non-empty array of strings"},
+            }
+
+        existing_keys = {
+            normalize_match_text(keyword)
+            for keyword in existing_keywords.get(ad_group_id, [])
+            if normalize_non_empty_string(keyword) is not None
+        }
+
+        for raw_keyword in raw_keywords:
+            keyword = normalize_keyword_text_for_direct(raw_keyword)
+            if keyword is None:
+                continue
+
+            dedupe_key = (ad_group_id, normalize_match_text(keyword))
+            if dedupe_key in seen_payload_keys or dedupe_key[1] in existing_keys:
+                skipped_duplicates.append({"ad_group_id": str(ad_group_id), "keyword": keyword})
+                continue
+
+            seen_payload_keys.add(dedupe_key)
+            prepared_keywords.append({"AdGroupId": ad_group_id, "Keyword": keyword})
+
+    if not prepared_keywords:
+        return {
+            "ok": False,
+            "status": 400,
+            "payload": {
+                "status": "error",
+                "message": "no valid new keywords to add",
+                "skipped_duplicates": skipped_duplicates,
+            },
+        }
+
+    return {
+        "ok": True,
+        "status": 200,
+        "payload": {
+            "prepared_keywords": prepared_keywords,
+            "skipped_duplicates": skipped_duplicates,
+        },
+    }
+
+
+def parse_keywords_add_results(result: dict, prepared_keywords: list[dict]) -> dict:
+    raw_add_results = result.get("result", {}).get("AddResults", [])
+    if not isinstance(raw_add_results, list) or not raw_add_results:
+        return {
+            "ok": False,
+            "status": 502,
+            "payload": {
+                "status": "error",
+                "message": "empty AddResults from Yandex Direct for keywords",
+                "raw": result,
+            },
+        }
+
+    items = []
+    has_errors = False
+
+    for index, action_result in enumerate(raw_add_results):
+        prepared_keyword = prepared_keywords[index] if index < len(prepared_keywords) else {}
+        item = {
+            "ad_group_id": str(prepared_keyword.get("AdGroupId")) if prepared_keyword.get("AdGroupId") is not None else None,
+            "keyword": prepared_keyword.get("Keyword"),
+            "id": None,
+            "warnings": [],
+            "errors": [],
+        }
+
+        if isinstance(action_result, dict):
+            keyword_id = normalize_positive_int_id(action_result.get("Id"))
+            if keyword_id is not None:
+                item["id"] = str(keyword_id)
+            item["warnings"] = action_result.get("Warnings", []) or []
+            item["errors"] = action_result.get("Errors", []) or []
+        else:
+            item["errors"] = [{"Message": "invalid AddResults item", "raw": action_result}]
+
+        if item["errors"]:
+            has_errors = True
+        items.append(item)
+
+    return {
+        "ok": not has_errors,
+        "status": 400 if has_errors else 200,
+        "payload": {
+            "status": "error" if has_errors else "success",
+            "message": "Yandex Direct rejected some keywords" if has_errors else "keywords added",
+            "results": items,
+            "raw": result,
         },
     }
 
@@ -3863,8 +4349,11 @@ def create_draft_structure_in_production_campaign(
                 continue
 
             normalize_draft_ad_images(raw_ad)
-            title = normalize_non_empty_string(raw_ad.get("title"))
-            text = normalize_non_empty_string(raw_ad.get("text"))
+            titles = extract_text_ad_titles(raw_ad)
+            texts = extract_text_ad_texts(raw_ad)
+            title = titles[0] if titles else None
+            title2 = titles[1] if len(titles) > 1 else None
+            text = texts[0] if texts else None
             href = normalize_draft_final_url(raw_ad.get("final_url"))
             ad_image_hash = normalize_non_empty_string(raw_ad.get("ad_image_hash"))
 
@@ -3886,6 +4375,7 @@ def create_draft_structure_in_production_campaign(
                     title=title,
                     text=text,
                     href=href,
+                    title2=title2,
                     ad_image_hash=ad_image_hash,
                 )
             except YandexDirectClientError as e:
@@ -3922,6 +4412,15 @@ def create_draft_structure_in_production_campaign(
                     "id": created_ad_id,
                     "ad_group_id": created_ad_group_id,
                     "title": title,
+                    "title2": title2,
+                    "titles": titles,
+                    "text": text,
+                    "texts": texts,
+                    "direct_payload_note": (
+                        "Only Title and Title2 are sent to Yandex Direct API; extra draft titles/texts are kept for generation/review."
+                        if len(titles) > DIRECT_TEXT_AD_SUPPORTED_TITLES or len(texts) > DIRECT_TEXT_AD_SUPPORTED_TEXTS
+                        else None
+                    ),
                 }
             )
 
@@ -6932,6 +7431,224 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if self.path == "/list_keywords":
+            target = resolve_target(data)
+            if target not in ALLOWED_TARGETS:
+                self._send_json({"status": "error", "message": "target must be 'sandbox' or 'production'"}, 400)
+                return
+
+            campaign_id = normalize_campaign_id(data.get("campaign_id")) if "campaign_id" in data else None
+            raw_ad_group_ids = data.get("ad_group_ids")
+            ad_group_ids = None
+            if raw_ad_group_ids is not None:
+                if not isinstance(raw_ad_group_ids, list) or not raw_ad_group_ids:
+                    self._send_json(
+                        {"status": "error", "message": "ad_group_ids must be a non-empty array when provided"},
+                        400,
+                    )
+                    return
+                ad_group_ids = []
+                for item in raw_ad_group_ids:
+                    normalized = normalize_ad_group_id(item)
+                    if normalized is None:
+                        self._send_json({"status": "error", "message": "each ad_group_id must be a positive integer or numeric string"}, 400)
+                        return
+                    ad_group_ids.append(normalized)
+
+            if campaign_id is None and not ad_group_ids:
+                self._send_json(
+                    {"status": "error", "message": "campaign_id or ad_group_ids must be provided"},
+                    400,
+                )
+                return
+
+            client = YandexDirectClient.for_target(target)
+
+            try:
+                result = client.get_keywords(
+                    campaign_ids=[campaign_id] if campaign_id is not None else None,
+                    ad_group_ids=ad_group_ids,
+                    field_names=[
+                        "Id",
+                        "Keyword",
+                        "State",
+                        "Status",
+                        "ServingStatus",
+                        "AdGroupId",
+                        "CampaignId",
+                    ],
+                )
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": target, "campaign_id": str(campaign_id) if campaign_id is not None else None},
+                    502,
+                )
+                return
+
+            keywords = []
+            for raw_keyword in result.get("result", {}).get("Keywords", []):
+                if not isinstance(raw_keyword, dict):
+                    continue
+                keywords.append(
+                    {
+                        "id": str(raw_keyword.get("Id")),
+                        "keyword": raw_keyword.get("Keyword"),
+                        "ad_group_id": str(raw_keyword.get("AdGroupId")),
+                        "campaign_id": str(raw_keyword.get("CampaignId")),
+                        "state": raw_keyword.get("State"),
+                        "status": raw_keyword.get("Status"),
+                        "serving_status": raw_keyword.get("ServingStatus"),
+                    }
+                )
+
+            self._send_json(
+                {
+                    "status": "success",
+                    "target": target,
+                    "campaign_id": str(campaign_id) if campaign_id is not None else None,
+                    "ad_group_ids": [str(item) for item in ad_group_ids] if ad_group_ids else None,
+                    "keywords": keywords,
+                    "raw": result,
+                },
+                200,
+            )
+            return
+
+        if self.path == "/add_keywords_to_ad_groups":
+            target = resolve_target(data)
+            if target not in ALLOWED_TARGETS:
+                self._send_json({"status": "error", "message": "target must be 'sandbox' or 'production'"}, 400)
+                return
+
+            raw_items = data.get("items")
+            if raw_items is None and isinstance(data.get("ad_group_keywords"), dict):
+                raw_items = [
+                    {"ad_group_id": ad_group_id, "keywords": keywords}
+                    for ad_group_id, keywords in data["ad_group_keywords"].items()
+                ]
+
+            if not isinstance(raw_items, list) or not raw_items:
+                self._send_json(
+                    {"status": "error", "message": "items must be a non-empty array of {ad_group_id, keywords}"},
+                    400,
+                )
+                return
+
+            requested_ad_group_ids = []
+            for item in raw_items:
+                if not isinstance(item, dict):
+                    self._send_json({"status": "error", "message": "each item must be an object"}, 400)
+                    return
+                ad_group_id = normalize_ad_group_id(item.get("ad_group_id") or item.get("AdGroupId"))
+                if ad_group_id is None:
+                    self._send_json(
+                        {"status": "error", "message": "each item.ad_group_id must be a positive integer or numeric string"},
+                        400,
+                    )
+                    return
+                if ad_group_id not in requested_ad_group_ids:
+                    requested_ad_group_ids.append(ad_group_id)
+
+            client = YandexDirectClient.for_target(target)
+            warnings = []
+            existing_keywords_by_ad_group_id: dict[int, list[str]] = {}
+
+            try:
+                current_keywords_result = client.get_keywords(
+                    ad_group_ids=requested_ad_group_ids,
+                    field_names=["Id", "Keyword", "AdGroupId", "CampaignId"],
+                )
+            except YandexDirectClientError as e:
+                warnings.append(f"Could not list current keywords before add: {str(e)}")
+            else:
+                for raw_keyword in current_keywords_result.get("result", {}).get("Keywords", []):
+                    if not isinstance(raw_keyword, dict):
+                        continue
+                    ad_group_id = normalize_ad_group_id(raw_keyword.get("AdGroupId"))
+                    keyword_text = normalize_non_empty_string(raw_keyword.get("Keyword"))
+                    if ad_group_id is None or keyword_text is None:
+                        continue
+                    existing_keywords_by_ad_group_id.setdefault(ad_group_id, []).append(keyword_text)
+
+            preview_result = build_keywords_add_preview(
+                raw_items,
+                existing_keywords_by_ad_group_id=existing_keywords_by_ad_group_id,
+            )
+            if not preview_result["ok"]:
+                payload = preview_result["payload"]
+                payload["target"] = target
+                payload["ad_group_ids"] = [str(ad_group_id) for ad_group_id in requested_ad_group_ids]
+                if warnings:
+                    payload["warnings"] = warnings
+                self._send_json(payload, preview_result["status"])
+                return
+
+            prepared_keywords = preview_result["payload"]["prepared_keywords"]
+            skipped_duplicates = preview_result["payload"]["skipped_duplicates"]
+            preview_payload = [
+                {
+                    "ad_group_id": str(item["AdGroupId"]),
+                    "keyword": item["Keyword"],
+                }
+                for item in prepared_keywords
+            ]
+
+            dry_run = resolve_confirm({"confirm": data.get("dry_run", False)})
+            confirm = resolve_confirm(data)
+            if dry_run:
+                self._send_json(
+                    {
+                        "status": "success",
+                        "target": target,
+                        "dry_run": True,
+                        "keywords_to_add": preview_payload,
+                        "skipped_duplicates": skipped_duplicates,
+                        "warnings": warnings,
+                    },
+                    200,
+                )
+                return
+
+            if target == "production" and not confirm:
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": "production keywords add requires explicit confirm=true",
+                        "target": "production",
+                        "keywords_to_add": preview_payload,
+                        "skipped_duplicates": skipped_duplicates,
+                        "warnings": warnings,
+                    },
+                    400,
+                )
+                return
+
+            try:
+                result = client.add_keywords(prepared_keywords)
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {
+                        "status": "error",
+                        "message": str(e),
+                        "target": target,
+                        "keywords_to_add": preview_payload,
+                        "skipped_duplicates": skipped_duplicates,
+                        "warnings": warnings,
+                    },
+                    502,
+                )
+                return
+
+            parsed = parse_keywords_add_results(result, prepared_keywords)
+            payload = parsed["payload"]
+            payload["target"] = target
+            payload["keywords_to_add"] = preview_payload
+            payload["skipped_duplicates"] = skipped_duplicates
+            if warnings:
+                payload["warnings"] = warnings
+            self._send_json(payload, parsed["status"])
+            return
+
         if self.path == "/save_approved_pattern":
             pattern_type = data.get("pattern_type")
             if pattern_type not in {
@@ -7214,6 +7931,53 @@ class Handler(BaseHTTPRequestHandler):
                 max_ads=max_ads,
             )
             self._send_json(result["payload"], result["status"])
+            return
+
+        if self.path == "/export_campaign_ad_creative_prompts":
+            target = resolve_target(data)
+            if target not in ALLOWED_TARGETS:
+                self._send_json({"status": "error", "message": "target must be 'sandbox' or 'production'"}, 400)
+                return
+
+            campaign_id = normalize_campaign_id(data.get("campaign_id"))
+            if campaign_id is None:
+                self._send_json({"status": "error", "message": "campaign_id must be a positive integer or numeric string"}, 400)
+                return
+
+            requested_theme = normalize_non_empty_string(data.get("theme"))
+            max_ads = None
+            if "max_ads" in data:
+                max_ads = normalize_non_negative_int(data.get("max_ads"))
+                if max_ads is None or max_ads <= 0:
+                    self._send_json({"status": "error", "message": "max_ads must be a positive integer when provided"}, 400)
+                    return
+                if max_ads > 128:
+                    self._send_json({"status": "error", "message": "max_ads must be 128 or less"}, 400)
+                    return
+
+            client = YandexDirectClient.for_target(target)
+            collection_result = collect_direct_campaign_for_creative_prompts(
+                client=client,
+                campaign_id=campaign_id,
+                target=target,
+            )
+            if not collection_result["ok"]:
+                self._send_json(collection_result["payload"], collection_result["status"])
+                return
+
+            collection_payload = collection_result["payload"]
+            result = build_creative_prompt_pack_archive(
+                draft_campaign=collection_payload["draft_campaign"],
+                requested_theme=requested_theme,
+                max_ads=max_ads,
+                initial_warnings=collection_payload.get("warnings", []),
+            )
+            payload = result["payload"]
+            payload["target"] = target
+            payload["campaign_id"] = str(campaign_id)
+            payload["campaign_name"] = collection_payload["draft_campaign"].get("campaign_name")
+            payload["source"] = "direct_campaign"
+            self._send_json(payload, result["status"])
             return
 
         if self.path == "/apply_site_image_to_draft_ad":
@@ -7754,26 +8518,38 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json({"status": "error", "message": "ad_group_index must be a non-negative integer or numeric string for scope=ad_group"}, 400)
                     return
 
-            has_any_field = any(field in data for field in ("title", "text", "final_url"))
+            has_any_field = any(field in data for field in ("title", "title2", "titles", "text", "texts", "final_url"))
             if not has_any_field:
-                self._send_json({"status": "error", "message": "at least one of title, text, final_url must be provided"}, 400)
+                self._send_json({"status": "error", "message": "at least one of title, title2, titles, text, texts, final_url must be provided"}, 400)
                 return
 
             updates = {}
 
-            if "title" in data:
-                title = normalize_non_empty_string(data.get("title"))
-                if title is None:
-                    self._send_json({"status": "error", "message": "title must be a non-empty string when provided"}, 400)
+            if any(field in data for field in ("title", "titles")):
+                titles = extract_text_ad_titles(data)
+                if not titles:
+                    self._send_json({"status": "error", "message": "title/titles must contain at least one non-empty string when provided"}, 400)
                     return
-                updates["title"] = title
+                if "title2" in data:
+                    title2 = normalize_non_empty_string(data.get("title2"))
+                    if title2 is None:
+                        self._send_json({"status": "error", "message": "title2 must be a non-empty string when provided"}, 400)
+                        return
+                    titles = insert_text_ad_variant(titles, title2, 1, MAX_DRAFT_TEXT_AD_TITLES)
+                updates["titles"] = titles
+            elif "title2" in data:
+                title2 = normalize_non_empty_string(data.get("title2"))
+                if title2 is None:
+                    self._send_json({"status": "error", "message": "title2 must be a non-empty string when provided"}, 400)
+                    return
+                updates["title2"] = title2
 
-            if "text" in data:
-                text = normalize_non_empty_string(data.get("text"))
-                if text is None:
-                    self._send_json({"status": "error", "message": "text must be a non-empty string when provided"}, 400)
+            if any(field in data for field in ("text", "texts")):
+                texts = extract_text_ad_texts(data)
+                if not texts:
+                    self._send_json({"status": "error", "message": "text/texts must contain at least one non-empty string when provided"}, 400)
                     return
-                updates["text"] = text
+                updates["texts"] = texts
 
             if "final_url" in data:
                 final_url = normalize_draft_final_url(data.get("final_url"))
@@ -7799,10 +8575,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"status": "error", "message": "draft ad not found for provided scope/indexes"}, 400)
                 return
 
-            if "title" in updates:
-                draft_ad["title"] = updates["title"]
-            if "text" in updates:
-                draft_ad["text"] = updates["text"]
+            if "titles" in updates:
+                apply_text_ad_variants_to_draft_ad(draft_ad, titles=updates["titles"])
+            elif "title2" in updates:
+                current_titles = extract_text_ad_titles(draft_ad)
+                if not current_titles:
+                    current_titles = [updates["title2"]]
+                current_titles = insert_text_ad_variant(current_titles, updates["title2"], 1, MAX_DRAFT_TEXT_AD_TITLES)
+                apply_text_ad_variants_to_draft_ad(draft_ad, titles=current_titles)
+            if "texts" in updates:
+                apply_text_ad_variants_to_draft_ad(draft_ad, texts=updates["texts"])
             if "final_url" in updates:
                 draft_ad["final_url"] = updates["final_url"]
 
@@ -9617,15 +10399,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"status": "error", "message": "ad_group_id must be a positive integer or numeric string"}, 400)
                 return
 
-            title = data.get("title")
-            if not isinstance(title, str) or not title.strip():
-                self._send_json({"status": "error", "message": "title must be a non-empty string"}, 400)
+            titles = extract_text_ad_titles(data)
+            if not titles:
+                self._send_json({"status": "error", "message": "title or titles must contain at least one non-empty string"}, 400)
                 return
+            title = titles[0]
+            title2 = titles[1] if len(titles) > 1 else None
 
-            text = data.get("text")
-            if not isinstance(text, str) or not text.strip():
-                self._send_json({"status": "error", "message": "text must be a non-empty string"}, 400)
+            texts = extract_text_ad_texts(data)
+            if not texts:
+                self._send_json({"status": "error", "message": "text or texts must contain at least one non-empty string"}, 400)
                 return
+            text = texts[0]
 
             href = data.get("href")
             if not isinstance(href, str) or not href.strip():
@@ -9667,9 +10452,10 @@ class Handler(BaseHTTPRequestHandler):
                 if target == "sandbox":
                     result = client.add_text_ad_sandbox(
                         ad_group_id=ad_group_id,
-                        title=title.strip(),
-                        text=text.strip(),
+                        title=title,
+                        text=text,
                         href=href.strip(),
+                        title2=title2,
                         display_url_path=display_url_path,
                         ad_image_hash=ad_image_hash,
                         sitelink_set_id=sitelink_set_id,
@@ -9677,9 +10463,10 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     result = client.add_text_ad_production(
                         ad_group_id=ad_group_id,
-                        title=title.strip(),
-                        text=text.strip(),
+                        title=title,
+                        text=text,
                         href=href.strip(),
+                        title2=title2,
                         display_url_path=display_url_path,
                         ad_image_hash=ad_image_hash,
                         sitelink_set_id=sitelink_set_id,
@@ -9714,6 +10501,132 @@ class Handler(BaseHTTPRequestHandler):
                 "ad_group_id": str(ad_group_id),
                 "target": target,
                 "data": data,
+                "titles": titles,
+                "texts": texts,
+                "direct_payload_note": (
+                    "Only Title and Title2 are sent to Yandex Direct API; extra titles/texts are accepted by backend for draft/review but not by Direct TextAd API."
+                    if len(titles) > DIRECT_TEXT_AD_SUPPORTED_TITLES or len(texts) > DIRECT_TEXT_AD_SUPPORTED_TEXTS
+                    else None
+                ),
+            }
+            if ad_details is not None:
+                response_payload["ad"] = ad_details
+
+            self._send_json(response_payload, 200)
+            return
+
+        if self.path == "/update_ad_texts":
+            target = resolve_target(data)
+            if target not in ALLOWED_TARGETS:
+                self._send_json({"status": "error", "message": "target must be 'sandbox' or 'production'"}, 400)
+                return
+
+            ad_id = normalize_ad_id(data.get("ad_id"))
+            if ad_id is None:
+                self._send_json({"status": "error", "message": "ad_id must be a positive integer or numeric string"}, 400)
+                return
+
+            has_any_field = any(field in data for field in ("title", "title2", "titles", "text", "texts", "href"))
+            if not has_any_field:
+                self._send_json({"status": "error", "message": "at least one of title, title2, titles, text, texts, href must be provided"}, 400)
+                return
+
+            title = None
+            title2 = None
+            text = None
+            href = None
+            titles = None
+            texts = None
+
+            if any(field in data for field in ("title", "titles")):
+                titles = extract_text_ad_titles(data)
+                if not titles:
+                    self._send_json({"status": "error", "message": "title/titles must contain at least one non-empty string when provided"}, 400)
+                    return
+                if "title2" in data:
+                    explicit_title2 = normalize_non_empty_string(data.get("title2"))
+                    if explicit_title2 is None:
+                        self._send_json({"status": "error", "message": "title2 must be a non-empty string when provided"}, 400)
+                        return
+                    titles = insert_text_ad_variant(titles, explicit_title2, 1, MAX_DRAFT_TEXT_AD_TITLES)
+                if titles:
+                    title = titles[0]
+                    title2 = titles[1] if len(titles) > 1 else None
+            elif "title2" in data:
+                title2 = normalize_non_empty_string(data.get("title2"))
+                if title2 is None:
+                    self._send_json({"status": "error", "message": "title2 must be a non-empty string when provided"}, 400)
+                    return
+
+            if any(field in data for field in ("text", "texts")):
+                texts = extract_text_ad_texts(data)
+                if not texts:
+                    self._send_json({"status": "error", "message": "text/texts must contain at least one non-empty string when provided"}, 400)
+                    return
+                text = texts[0]
+
+            if "href" in data:
+                href = data.get("href")
+                if not isinstance(href, str) or not href.strip():
+                    self._send_json({"status": "error", "message": "href must be a non-empty string when provided"}, 400)
+                    return
+                href = href.strip()
+
+            confirm = resolve_confirm(data)
+            if target == "production" and not confirm:
+                self._send_json(
+                    {"status": "error", "message": "production ad text update requires explicit confirm=true", "target": "production"},
+                    400,
+                )
+                return
+
+            client = YandexDirectClient.for_target(target)
+
+            try:
+                result = client.update_text_ad_content(
+                    ad_id=ad_id,
+                    title=title,
+                    title2=title2,
+                    text=text,
+                    href=href,
+                )
+            except YandexDirectClientError as e:
+                self._send_json(
+                    {"status": "error", "message": str(e), "target": target, "ad_id": str(ad_id)},
+                    502,
+                )
+                return
+
+            parsed = parse_update_result(result, "ad")
+            if not parsed["ok"]:
+                payload = parsed["payload"]
+                payload["target"] = target
+                payload["ad_id"] = str(ad_id)
+                self._send_json(payload, parsed["status"])
+                return
+
+            ad_details = None
+            try:
+                ad_result = client.get_ad_details(ad_id)
+                ads = ad_result.get("result", {}).get("Ads", [])
+                if ads:
+                    ad_details = ads[0]
+            except YandexDirectClientError:
+                ad_details = None
+
+            response_payload = {
+                "status": "success",
+                "target": target,
+                "ad_id": str(ad_id),
+                "titles": titles,
+                "texts": texts,
+                "direct_payload_note": (
+                    "Only Title and Title2 are sent to Yandex Direct API; extra titles/texts are accepted by backend for draft/review but not by Direct TextAd API."
+                    if (titles is not None and len(titles) > DIRECT_TEXT_AD_SUPPORTED_TITLES)
+                    or (texts is not None and len(texts) > DIRECT_TEXT_AD_SUPPORTED_TEXTS)
+                    else None
+                ),
+                "raw": result,
             }
             if ad_details is not None:
                 response_payload["ad"] = ad_details
@@ -9957,7 +10870,18 @@ class Handler(BaseHTTPRequestHandler):
                         "status_clarification": ad.get("StatusClarification"),
                         "type": ad.get("Type"),
                         "title": text_ad.get("Title"),
+                        "title2": text_ad.get("Title2"),
+                        "titles": [
+                            title
+                            for title in [text_ad.get("Title"), text_ad.get("Title2")]
+                            if normalize_non_empty_string(title) is not None
+                        ],
                         "text": text_ad.get("Text"),
+                        "texts": [
+                            text_ad.get("Text"),
+                        ]
+                        if normalize_non_empty_string(text_ad.get("Text")) is not None
+                        else [],
                         "href": text_ad.get("Href"),
                         "display_url_path": text_ad.get("DisplayUrlPath"),
                         "ad_image_hash": text_ad.get("AdImageHash"),
