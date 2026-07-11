@@ -17,6 +17,7 @@ from typing import List, Optional
 from config import settings
 from services.direct_client import YandexDirectClient, YandexDirectClientError
 from services.direct_mock import validate_campaign
+from services.metrika_client import YandexMetrikaClient, YandexMetrikaClientError
 from services.search_terms_analyzer import analyze_search_terms, build_negative_preview_candidates
 
 
@@ -29,6 +30,11 @@ ALLOWED_AUTOTARGETING_BRAND_OPTION_KEYS = {"WithoutBrands", "WithAdvertiserBrand
 DEFAULT_METRICA_COUNTER_ID = 99041859
 DEFAULT_GOAL_ID = 352606262
 DEFAULT_PRODUCTION_REGION_IDS = [225]
+DEFAULT_METRIKA_REPORT_LIMIT = 100
+DEFAULT_METRIKA_NEGATIVE_MIN_VISITS = 10
+DEFAULT_METRIKA_NEGATIVE_BOUNCE_RATE = 70.0
+DEFAULT_METRIKA_NEGATIVE_MAX_PAGE_DEPTH = 1.25
+DEFAULT_METRIKA_NEGATIVE_MAX_DURATION_SECONDS = 25.0
 STATE_FILE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "STATE.md"))
 EXPORTS_DIR_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "exports"))
 CREATIVE_PROMPT_PACKS_DIR = os.path.join(EXPORTS_DIR_PATH, "creative_prompt_packs")
@@ -62,6 +68,31 @@ DECORATIVE_IMAGE_HINTS = (
     "vk",
     "loader",
     "placeholder",
+)
+METRIKA_IRRELEVANT_NEGATIVE_TOKENS = (
+    "костюм",
+    "одежда",
+    "нос",
+    "грим",
+    "макияж",
+    "аниматор",
+    "цирк",
+    "раскраска",
+    "рисунок",
+    "картинки",
+    "фото",
+    "обои",
+    "фильм",
+    "актеры",
+    "видео",
+    "википедия",
+    "бесплатно",
+    "скачать",
+    "wildberries",
+    "ozon",
+    "валберис",
+    "маркет",
+    "авито",
 )
 CRAWL_PATH_BANNED_HINTS = ("/contacts", "/delivery", "/oplata", "/cart", "/profile", "/login")
 COMPETITOR_CRAWL_BANNED_HINTS = CRAWL_PATH_BANNED_HINTS + (
@@ -4762,6 +4793,526 @@ def build_optimize_campaign_from_search_terms_response(campaign_id: int, raw_dat
     )
 
 
+def normalize_metrika_attribution(value) -> str:
+    normalized = YandexMetrikaClient.normalize_attribution(value)
+    return normalized or ""
+
+
+def normalize_metrika_dimension_kind(value) -> str:
+    if value in ("", None):
+        return "direct_search_phrase"
+    if not isinstance(value, str):
+        return ""
+    normalized = value.strip().lower().replace("-", "_")
+    aliases = {
+        "direct_search_phrase": "direct_search_phrase",
+        "search_phrase": "direct_search_phrase",
+        "query": "direct_search_phrase",
+        "utm_term": "utm_term",
+        "keyword": "utm_term",
+        "direct_phrase_or_condition": "direct_phrase_or_condition",
+        "direct_phrase": "direct_phrase_or_condition",
+        "condition": "direct_phrase_or_condition",
+    }
+    return aliases.get(normalized, "")
+
+
+def normalize_metrika_limit(value, default: int = DEFAULT_METRIKA_REPORT_LIMIT) -> Optional[int]:
+    if value in ("", None):
+        return default
+    normalized = normalize_non_negative_int(value)
+    if normalized is None or normalized <= 0:
+        return None
+    return min(normalized, 1000)
+
+
+def resolve_metrika_report_dates(raw_date_from=None, raw_date_to=None):
+    normalized_date_from = normalize_iso_date(raw_date_from) if raw_date_from is not None else None
+    normalized_date_to = normalize_iso_date(raw_date_to) if raw_date_to is not None else None
+
+    if raw_date_from is not None and normalized_date_from is None:
+        return None, None, {"status": "error", "message": "date_from must be in YYYY-MM-DD format"}
+
+    if raw_date_to is not None and normalized_date_to is None:
+        return None, None, {"status": "error", "message": "date_to must be in YYYY-MM-DD format"}
+
+    date_to = normalized_date_to or (date.today() - timedelta(days=1)).isoformat()
+    if normalized_date_from is None:
+        date_from = (date.fromisoformat(date_to) - timedelta(days=29)).isoformat()
+    else:
+        date_from = normalized_date_from
+
+    if date_from > date_to:
+        return None, None, {"status": "error", "message": "date_from must be <= date_to"}
+
+    return date_from, date_to, None
+
+
+def extract_metrika_dimension_name(row: dict) -> str:
+    dimensions = row.get("dimensions")
+    if not isinstance(dimensions, list) or not dimensions:
+        return ""
+    first_dimension = dimensions[0]
+    if not isinstance(first_dimension, dict):
+        return ""
+    return normalize_non_empty_string(first_dimension.get("name")) or ""
+
+
+def extract_metrika_dimension_id(row: dict) -> str:
+    dimensions = row.get("dimensions")
+    if not isinstance(dimensions, list) or not dimensions:
+        return ""
+    first_dimension = dimensions[0]
+    if not isinstance(first_dimension, dict):
+        return ""
+    normalized_id = first_dimension.get("id")
+    if normalized_id in ("", None):
+        return ""
+    return str(normalized_id)
+
+
+def parse_metrika_quality_rows(report: dict, dimension_kind: str) -> list[dict]:
+    rows: list[dict] = []
+    for raw_row in report.get("data", []):
+        if not isinstance(raw_row, dict):
+            continue
+        metrics = raw_row.get("metrics")
+        if not isinstance(metrics, list):
+            metrics = []
+
+        phrase = extract_metrika_dimension_name(raw_row)
+        rows.append(
+            {
+                "phrase": phrase,
+                "dimension_id": extract_metrika_dimension_id(raw_row),
+                "dimension_kind": dimension_kind,
+                "visits": safe_float(metrics[0] if len(metrics) > 0 else 0),
+                "users": safe_float(metrics[1] if len(metrics) > 1 else 0),
+                "bounce_rate": safe_float(metrics[2] if len(metrics) > 2 else 0),
+                "page_depth": safe_float(metrics[3] if len(metrics) > 3 else 0),
+                "avg_visit_duration_seconds": safe_float(metrics[4] if len(metrics) > 4 else 0),
+                "goal_reaches": safe_float(metrics[5] if len(metrics) > 5 else 0),
+                "goal_conversion_rate": safe_float(metrics[6] if len(metrics) > 6 else 0),
+            }
+        )
+    return rows
+
+
+def is_metrika_undefined_phrase(value: str) -> bool:
+    normalized = normalize_match_text(value)
+    return normalized in {
+        "",
+        "не определено",
+        "undefined",
+        "not set",
+        "none",
+        "(not set)",
+        "unknown",
+    }
+
+
+def extract_metrika_irrelevant_tokens(value: str) -> list[str]:
+    tokens = re.findall(r"[0-9A-Za-zА-Яа-яЁё]+", value.lower())
+    matched_tokens = []
+    for token in tokens:
+        if token in METRIKA_IRRELEVANT_NEGATIVE_TOKENS and token not in matched_tokens:
+            matched_tokens.append(token)
+    return matched_tokens
+
+
+def build_metrika_negative_candidates(
+    rows: list[dict],
+    *,
+    min_visits: int = DEFAULT_METRIKA_NEGATIVE_MIN_VISITS,
+    bounce_rate_threshold: float = DEFAULT_METRIKA_NEGATIVE_BOUNCE_RATE,
+    max_page_depth: float = DEFAULT_METRIKA_NEGATIVE_MAX_PAGE_DEPTH,
+    max_duration_seconds: float = DEFAULT_METRIKA_NEGATIVE_MAX_DURATION_SECONDS,
+) -> list[dict]:
+    candidates = []
+    seen = set()
+
+    for row in rows:
+        phrase = normalize_non_empty_string(row.get("phrase"))
+        if phrase is None or is_metrika_undefined_phrase(phrase):
+            continue
+
+        visits = safe_float(row.get("visits"))
+        goal_reaches = safe_float(row.get("goal_reaches"))
+        bounce_rate = safe_float(row.get("bounce_rate"))
+        page_depth = safe_float(row.get("page_depth"))
+        duration = safe_float(row.get("avg_visit_duration_seconds"))
+        matched_tokens = extract_metrika_irrelevant_tokens(phrase)
+
+        no_goal = goal_reaches <= 0
+        enough_visits = visits >= min_visits
+        weak_behavior_signals = []
+        if bounce_rate >= bounce_rate_threshold:
+            weak_behavior_signals.append(f"bounce_rate {round(bounce_rate, 2)}%")
+        if 0 < page_depth <= max_page_depth:
+            weak_behavior_signals.append(f"page_depth {round(page_depth, 2)}")
+        if 0 < duration <= max_duration_seconds:
+            weak_behavior_signals.append(f"avg_duration {round(duration, 2)}s")
+
+        suggested_negative = None
+        reason = None
+        risk = "medium"
+
+        if matched_tokens:
+            suggested_negative = matched_tokens[0]
+            reason = f"Фраза содержит явно нерелевантный токен: {matched_tokens[0]}."
+            risk = "low"
+        elif enough_visits and no_goal and weak_behavior_signals:
+            suggested_negative = phrase
+            reason = (
+                "Есть визиты без достижений цели и слабые post-click сигналы: "
+                + ", ".join(weak_behavior_signals)
+                + "."
+            )
+            risk = "medium"
+        elif visits >= (min_visits * 2) and no_goal:
+            suggested_negative = phrase
+            reason = "Есть устойчивый трафик без достижений цели."
+            risk = "medium"
+
+        if suggested_negative is None:
+            continue
+
+        signature = (normalize_match_text(suggested_negative), normalize_match_text(phrase))
+        if signature in seen:
+            continue
+        seen.add(signature)
+
+        candidates.append(
+            {
+                "phrase": phrase,
+                "query": phrase,
+                "suggested_negative": suggested_negative,
+                "level": "campaign",
+                "reason": reason,
+                "risk": risk,
+                "source": "metrika",
+                "dimension_kind": row.get("dimension_kind"),
+                "visits": format_rub_value(visits),
+                "users": format_rub_value(safe_float(row.get("users"))),
+                "bounce_rate": round(bounce_rate, 4),
+                "page_depth": round(page_depth, 4),
+                "avg_visit_duration_seconds": round(duration, 4),
+                "goal_reaches": round(goal_reaches, 4),
+                "goal_conversion_rate": round(safe_float(row.get("goal_conversion_rate")), 4),
+            }
+        )
+
+    candidates.sort(
+        key=lambda item: (
+            0 if item.get("risk") == "low" else 1,
+            -safe_float(item.get("visits")),
+            -safe_float(item.get("bounce_rate")),
+            item.get("phrase", ""),
+        )
+    )
+    return candidates
+
+
+def build_metrika_quality_summary(rows: list[dict], candidates: list[dict], *, processing: bool = False) -> str:
+    if processing:
+        return "Отчет Метрики еще формируется. Ничего не применено."
+
+    total_rows = len(rows)
+    total_visits = sum(safe_float(row.get("visits")) for row in rows)
+    total_goal_reaches = sum(safe_float(row.get("goal_reaches")) for row in rows)
+    bad_rows = [
+        row
+        for row in rows
+        if safe_float(row.get("visits")) > 0 and safe_float(row.get("goal_reaches")) <= 0
+    ]
+    examples = ", ".join(
+        f'{item["suggested_negative"]} <- {item["phrase"]}'
+        for item in candidates[:5]
+    ) or "нет"
+
+    return (
+        f"Метрика: найдено {format_rub_value(total_rows)} фраз, "
+        f"{format_rub_value(total_visits)} визитов, "
+        f"{format_rub_value(total_goal_reaches)} достижений цели. "
+        f"Фраз без цели: {format_rub_value(len(bad_rows))}. "
+        f"Кандидатов в минус-фразы: {format_rub_value(len(candidates))}. "
+        f"Примеры: {examples}. Ничего не применено без confirm=true."
+    )
+
+
+def build_metrika_status_response(raw_counter_id=None):
+    counter_id = normalize_campaign_id(raw_counter_id) if raw_counter_id is not None else DEFAULT_METRICA_COUNTER_ID
+    if counter_id is None:
+        return {"status": "error", "message": "counter_id must be a positive integer or numeric string"}, 400
+
+    client = YandexMetrikaClient()
+    status_payload = client.ping()
+    try:
+        counter_result = client.get_counter(counter_id)
+    except YandexMetrikaClientError as e:
+        return {
+            "status": "error",
+            "message": str(e),
+            "metrika": status_payload,
+            "counter_id": str(counter_id),
+        }, 502
+
+    counter = counter_result.get("counter", {}) if isinstance(counter_result, dict) else {}
+    return {
+        "status": "success",
+        "metrika": status_payload,
+        "counter_id": str(counter_id),
+        "counter": {
+            "id": str(counter.get("id") or counter_id),
+            "name": counter.get("name"),
+            "site": counter.get("site") or counter.get("site2"),
+            "status": counter.get("status"),
+        },
+    }, 200
+
+
+def build_metrika_goals_response(raw_counter_id=None):
+    counter_id = normalize_campaign_id(raw_counter_id) if raw_counter_id is not None else DEFAULT_METRICA_COUNTER_ID
+    if counter_id is None:
+        return {"status": "error", "message": "counter_id must be a positive integer or numeric string"}, 400
+
+    client = YandexMetrikaClient()
+    try:
+        goals_result = client.get_goals(counter_id)
+    except YandexMetrikaClientError as e:
+        return {"status": "error", "message": str(e), "counter_id": str(counter_id)}, 502
+
+    goals = []
+    for raw_goal in goals_result.get("goals", []):
+        if not isinstance(raw_goal, dict):
+            continue
+        goal_id = normalize_positive_int_id(raw_goal.get("id"))
+        goals.append(
+            {
+                "id": str(goal_id) if goal_id is not None else str(raw_goal.get("id", "")),
+                "name": raw_goal.get("name"),
+                "type": raw_goal.get("type"),
+                "is_favorite": raw_goal.get("is_favorite"),
+            }
+        )
+
+    return {
+        "status": "success",
+        "counter_id": str(counter_id),
+        "goals": goals,
+        "default_goal_id": str(DEFAULT_GOAL_ID),
+    }, 200
+
+
+def build_metrika_campaign_quality_response(
+    campaign_id: int,
+    *,
+    raw_counter_id=None,
+    raw_goal_id=None,
+    raw_date_from=None,
+    raw_date_to=None,
+    raw_attribution=None,
+    raw_dimension_kind=None,
+    raw_limit=None,
+):
+    counter_id = normalize_campaign_id(raw_counter_id) if raw_counter_id is not None else DEFAULT_METRICA_COUNTER_ID
+    if counter_id is None:
+        return {"status": "error", "message": "counter_id must be a positive integer or numeric string"}, 400
+
+    goal_id = normalize_campaign_id(raw_goal_id) if raw_goal_id is not None else DEFAULT_GOAL_ID
+    if goal_id is None:
+        return {"status": "error", "message": "goal_id must be a positive integer or numeric string"}, 400
+
+    attribution = normalize_metrika_attribution(raw_attribution)
+    if not attribution:
+        return {"status": "error", "message": "attribution must be 'lastsign' or 'last'"}, 400
+
+    dimension_kind = normalize_metrika_dimension_kind(raw_dimension_kind)
+    if not dimension_kind:
+        return {
+            "status": "error",
+            "message": "dimension_kind must be direct_search_phrase, direct_phrase_or_condition, or utm_term",
+        }, 400
+
+    limit = normalize_metrika_limit(raw_limit)
+    if limit is None:
+        return {"status": "error", "message": "limit must be a positive integer when provided"}, 400
+
+    date_from, date_to, date_error = resolve_metrika_report_dates(raw_date_from=raw_date_from, raw_date_to=raw_date_to)
+    if date_error is not None:
+        return date_error, 400
+
+    client = YandexMetrikaClient()
+    try:
+        report = client.get_direct_phrase_quality_report(
+            counter_id=counter_id,
+            campaign_id=campaign_id,
+            date_from=date_from,
+            date_to=date_to,
+            goal_id=goal_id,
+            attribution=attribution,
+            dimension_kind=dimension_kind,
+            limit=limit,
+        )
+    except YandexMetrikaClientError as e:
+        return {
+            "status": "error",
+            "message": str(e),
+            "counter_id": str(counter_id),
+            "campaign_id": str(campaign_id),
+        }, 502
+
+    rows = parse_metrika_quality_rows(report, dimension_kind=dimension_kind)
+    candidates = build_metrika_negative_candidates(rows)
+
+    return {
+        "status": "success",
+        "source": "metrika",
+        "counter_id": str(counter_id),
+        "campaign_id": str(campaign_id),
+        "goal_id": str(goal_id),
+        "date_from": date_from,
+        "date_to": date_to,
+        "attribution": attribution,
+        "dimension_kind": dimension_kind,
+        "rows": rows,
+        "analysis": {
+            "total_rows": len(rows),
+            "total_visits": format_rub_value(sum(safe_float(row.get("visits")) for row in rows)),
+            "total_goal_reaches": round(sum(safe_float(row.get("goal_reaches")) for row in rows), 4),
+            "negative_candidates": candidates,
+            "contains_sensitive_data": report.get("contains_sensitive_data"),
+            "sampled": report.get("sampled"),
+            "sample_share": report.get("sample_share"),
+        },
+        "summary": build_metrika_quality_summary(rows, candidates),
+    }, 200
+
+
+def build_apply_metrika_negative_summary(applied_keywords: list[str], warnings: list[str], errors: list[dict]) -> str:
+    if applied_keywords:
+        examples = ", ".join(applied_keywords[:5])
+        return f"По Метрике применено {format_rub_value(len(applied_keywords))} минус-фраз. Примеры: {examples}."
+    if errors:
+        return "Минус-фразы по Метрике не применены из-за ошибки."
+    if warnings:
+        return "Новых минус-фраз по Метрике для применения не найдено."
+    return "Минус-фразы по Метрике не применены."
+
+
+def build_apply_metrika_negatives_response(
+    campaign_id: int,
+    *,
+    negative_keywords=None,
+    apply_medium_risk: bool = False,
+    raw_counter_id=None,
+    raw_goal_id=None,
+    raw_date_from=None,
+    raw_date_to=None,
+    raw_attribution=None,
+    raw_dimension_kind=None,
+    raw_limit=None,
+):
+    normalized_manual_keywords = None
+    if negative_keywords is not None:
+        normalized_manual_keywords = normalize_negative_keywords(negative_keywords)
+        if normalized_manual_keywords is None:
+            return {"status": "error", "message": "negative_keywords must be an array of non-empty strings"}, 400
+
+    preview_payload, preview_status_code = build_metrika_campaign_quality_response(
+        campaign_id=campaign_id,
+        raw_counter_id=raw_counter_id,
+        raw_goal_id=raw_goal_id,
+        raw_date_from=raw_date_from,
+        raw_date_to=raw_date_to,
+        raw_attribution=raw_attribution,
+        raw_dimension_kind=raw_dimension_kind,
+        raw_limit=raw_limit,
+    )
+    if preview_payload.get("status") == "error":
+        return preview_payload, preview_status_code
+
+    if normalized_manual_keywords is not None:
+        campaign_level_negative_keywords = normalized_manual_keywords
+        applied_source = "manual_metrika_negative_keywords"
+    else:
+        campaign_level_negative_keywords = []
+        for item in preview_payload.get("analysis", {}).get("negative_candidates", []):
+            if not isinstance(item, dict):
+                continue
+            if not apply_medium_risk and item.get("risk") != "low":
+                continue
+            suggested_negative = normalize_non_empty_string(item.get("suggested_negative"))
+            if suggested_negative is None:
+                continue
+            campaign_level_negative_keywords.append(suggested_negative)
+        applied_source = "metrika_preview"
+
+    client = YandexDirectClient.for_target("production")
+    sync_result = apply_campaign_negative_keywords_via_shared_set(
+        client=client,
+        campaign_id=campaign_id,
+        negative_keywords=campaign_level_negative_keywords,
+        shared_set_name=f"OpenClaw Metrika {campaign_id}",
+    )
+    sync_payload = sync_result["payload"]
+
+    return {
+        "status": "success" if sync_result["ok"] else "error",
+        "campaign_id": str(campaign_id),
+        "preview": {
+            "source": "metrika",
+            "negative_candidates": preview_payload.get("analysis", {}).get("negative_candidates", []),
+            "count": len(preview_payload.get("analysis", {}).get("negative_candidates", [])),
+            "auto_apply_policy": "low_risk_only" if not apply_medium_risk and normalized_manual_keywords is None else "explicit_keywords_or_all_confirmed_candidates",
+            "summary": preview_payload.get("summary"),
+        },
+        "applied": {
+            "negative_keywords": sync_payload.get("applied_negative_keywords", []),
+            "negative_keywords_already_present": sync_payload.get("already_existing_negative_keywords", []),
+            "source": applied_source,
+            "count": len(sync_payload.get("applied_negative_keywords", [])),
+            "shared_set_action": sync_payload.get("shared_set_action"),
+            "shared_set_id": sync_payload.get("shared_set_id"),
+            "shared_set_ids": sync_payload.get("shared_set_ids", []),
+        },
+        "warnings": sync_payload.get("warnings", []),
+        "errors": sync_payload.get("errors", []),
+        "summary": build_apply_metrika_negative_summary(
+            sync_payload.get("applied_negative_keywords", []),
+            sync_payload.get("warnings", []),
+            sync_payload.get("errors", []),
+        ),
+    }, sync_result["status"]
+
+
+def build_optimize_campaign_from_metrika_response(
+    campaign_id: int,
+    *,
+    confirm: bool = False,
+    apply_medium_risk: bool = False,
+    **kwargs,
+):
+    preview_payload, preview_status_code = build_metrika_campaign_quality_response(campaign_id=campaign_id, **kwargs)
+    if preview_payload.get("status") == "error":
+        return preview_payload, preview_status_code
+
+    if not confirm:
+        return {
+            "status": "success",
+            "mode": "preview",
+            "campaign_id": str(campaign_id),
+            "analysis": preview_payload.get("analysis", {}),
+            "summary": preview_payload.get("summary"),
+        }, 200
+
+    return build_apply_metrika_negatives_response(
+        campaign_id=campaign_id,
+        apply_medium_risk=apply_medium_risk,
+        **kwargs,
+    )
+
+
 def build_campaign_analysis_response(stats_payload: dict, focus: Optional[str] = None) -> dict:
     campaign_id = stats_payload.get("campaign_id")
     date_from = stats_payload.get("date_from")
@@ -5771,6 +6322,134 @@ class Handler(BaseHTTPRequestHandler):
                 raw_date_from=data.get("date_from"),
                 raw_date_to=data.get("date_to"),
                 analyze=analyze,
+            )
+            self._send_json(payload, status_code)
+            return
+
+        if self.path == "/get_metrika_status":
+            payload, status_code = build_metrika_status_response(
+                raw_counter_id=data.get("counter_id"),
+            )
+            self._send_json(payload, status_code)
+            return
+
+        if self.path == "/get_metrika_goals":
+            payload, status_code = build_metrika_goals_response(
+                raw_counter_id=data.get("counter_id"),
+            )
+            self._send_json(payload, status_code)
+            return
+
+        if self.path == "/analyze_metrika_campaign_quality":
+            campaign_id = normalize_campaign_id(data.get("campaign_id"))
+            if campaign_id is None:
+                self._send_json({"status": "error", "message": "campaign_id must be a positive integer or numeric string"}, 400)
+                return
+
+            payload, status_code = build_metrika_campaign_quality_response(
+                campaign_id=campaign_id,
+                raw_counter_id=data.get("counter_id"),
+                raw_goal_id=data.get("goal_id"),
+                raw_date_from=data.get("date_from"),
+                raw_date_to=data.get("date_to"),
+                raw_attribution=data.get("attribution"),
+                raw_dimension_kind=data.get("dimension_kind"),
+                raw_limit=data.get("limit"),
+            )
+            self._send_json(payload, status_code)
+            return
+
+        if self.path == "/preview_metrika_negative_keywords":
+            campaign_id = normalize_campaign_id(data.get("campaign_id"))
+            if campaign_id is None:
+                self._send_json({"status": "error", "message": "campaign_id must be a positive integer or numeric string"}, 400)
+                return
+
+            payload, status_code = build_metrika_campaign_quality_response(
+                campaign_id=campaign_id,
+                raw_counter_id=data.get("counter_id"),
+                raw_goal_id=data.get("goal_id"),
+                raw_date_from=data.get("date_from"),
+                raw_date_to=data.get("date_to"),
+                raw_attribution=data.get("attribution"),
+                raw_dimension_kind=data.get("dimension_kind"),
+                raw_limit=data.get("limit"),
+            )
+            if payload.get("status") == "success":
+                payload = {
+                    "status": "success",
+                    "source": "metrika",
+                    "campaign_id": payload.get("campaign_id"),
+                    "counter_id": payload.get("counter_id"),
+                    "goal_id": payload.get("goal_id"),
+                    "date_from": payload.get("date_from"),
+                    "date_to": payload.get("date_to"),
+                    "attribution": payload.get("attribution"),
+                    "dimension_kind": payload.get("dimension_kind"),
+                    "candidates": payload.get("analysis", {}).get("negative_candidates", []),
+                    "summary": payload.get("summary"),
+                }
+            self._send_json(payload, status_code)
+            return
+
+        if self.path == "/apply_metrika_negative_keywords":
+            confirm = resolve_confirm(data)
+            if not confirm:
+                self._send_json({"status": "error", "message": "apply_metrika_negative_keywords requires explicit confirm=true"}, 400)
+                return
+
+            campaign_id = normalize_campaign_id(data.get("campaign_id"))
+            if campaign_id is None:
+                self._send_json({"status": "error", "message": "campaign_id must be a positive integer or numeric string"}, 400)
+                return
+
+            apply_medium_risk = data.get("apply_medium_risk", False)
+            if not isinstance(apply_medium_risk, bool):
+                self._send_json({"status": "error", "message": "apply_medium_risk must be boolean when provided"}, 400)
+                return
+
+            payload, status_code = build_apply_metrika_negatives_response(
+                campaign_id=campaign_id,
+                negative_keywords=data.get("negative_keywords"),
+                apply_medium_risk=apply_medium_risk,
+                raw_counter_id=data.get("counter_id"),
+                raw_goal_id=data.get("goal_id"),
+                raw_date_from=data.get("date_from"),
+                raw_date_to=data.get("date_to"),
+                raw_attribution=data.get("attribution"),
+                raw_dimension_kind=data.get("dimension_kind"),
+                raw_limit=data.get("limit"),
+            )
+            self._send_json(payload, status_code)
+            return
+
+        if self.path == "/optimize_campaign_from_metrika":
+            campaign_id = normalize_campaign_id(data.get("campaign_id"))
+            if campaign_id is None:
+                self._send_json({"status": "error", "message": "campaign_id must be a positive integer or numeric string"}, 400)
+                return
+
+            confirm = data.get("confirm", False)
+            if not isinstance(confirm, bool):
+                self._send_json({"status": "error", "message": "confirm must be boolean when provided"}, 400)
+                return
+
+            apply_medium_risk = data.get("apply_medium_risk", False)
+            if not isinstance(apply_medium_risk, bool):
+                self._send_json({"status": "error", "message": "apply_medium_risk must be boolean when provided"}, 400)
+                return
+
+            payload, status_code = build_optimize_campaign_from_metrika_response(
+                campaign_id=campaign_id,
+                confirm=confirm,
+                apply_medium_risk=apply_medium_risk,
+                raw_counter_id=data.get("counter_id"),
+                raw_goal_id=data.get("goal_id"),
+                raw_date_from=data.get("date_from"),
+                raw_date_to=data.get("date_to"),
+                raw_attribution=data.get("attribution"),
+                raw_dimension_kind=data.get("dimension_kind"),
+                raw_limit=data.get("limit"),
             )
             self._send_json(payload, status_code)
             return
