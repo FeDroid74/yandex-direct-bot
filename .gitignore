@@ -4,3 +4,10 @@
 *.pyc
 *.swp
 backend/.env
+runtime/
+backups/
+exports/
+logs/
+backend/tests/test-marketer-*/
+deploy/*.tar.gz
+*.sqlite3*

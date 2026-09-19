@@ -1,0 +1,16 @@
+{
+  "id": "yandex-direct-bridge",
+  "name": "Yandex Direct Bridge",
+  "description": "Bridge from OpenClaw to local Yandex Direct backend",
+  "version": "1.0.1",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "baseUrl": {
+        "type": "string",
+        "default": "http://127.0.0.1:8091"
+      }
+    }
+  }
+}

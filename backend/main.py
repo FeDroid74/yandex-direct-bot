@@ -5435,15 +5435,18 @@ def build_metrika_negative_candidates(
         if phrase is None or is_metrika_undefined_phrase(phrase):
             continue
 
+        if row.get("dimension_kind") != "direct_search_phrase" or row.get("goal_reaches") is None:
+            continue
+
         visits = safe_float(row.get("visits"))
         goal_reaches = safe_float(row.get("goal_reaches"))
         bounce_rate = safe_float(row.get("bounce_rate"))
         page_depth = safe_float(row.get("page_depth"))
         duration = safe_float(row.get("avg_visit_duration_seconds"))
-        matched_tokens = extract_metrika_irrelevant_tokens(phrase)
-
         no_goal = goal_reaches <= 0
         enough_visits = visits >= min_visits
+        if not no_goal or not enough_visits:
+            continue
         weak_behavior_signals = []
         if bounce_rate >= bounce_rate_threshold:
             weak_behavior_signals.append(f"bounce_rate {round(bounce_rate, 2)}%")
@@ -5456,11 +5459,7 @@ def build_metrika_negative_candidates(
         reason = None
         risk = "medium"
 
-        if matched_tokens:
-            suggested_negative = matched_tokens[0]
-            reason = f"Фраза содержит явно нерелевантный токен: {matched_tokens[0]}."
-            risk = "low"
-        elif enough_visits and no_goal and weak_behavior_signals:
+        if enough_visits and no_goal and weak_behavior_signals:
             suggested_negative = phrase
             reason = (
                 "Есть визиты без достижений цели и слабые post-click сигналы: "

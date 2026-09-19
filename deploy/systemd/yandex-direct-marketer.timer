@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly result-oriented campaign analysis
+
+[Timer]
+OnCalendar=Mon *-*-* 12:00:00 Europe/Podgorica
+Persistent=true
+Unit=yandex-direct-marketer-run.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=Yandex Direct approval-driven marketer
+After=network-online.target openclaw-gateway.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/appuser/.openclaw/workspace/yandex-direct-bot
+EnvironmentFile=/home/appuser/.config/yandex-direct-bot/backend.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/appuser/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 backend/marketer_service.py --serve
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=default.target

@@ -1,5 +1,23 @@
 # AGENTS.md - Yandex Direct Agent Workspace
 
+## SEMI-AUTOMATIC MARKETER (current rules)
+
+These rules supersede older optimization/confirmation examples below for proposal cards.
+
+- The weekly marketer service collects Direct/Metrika data and invokes a separate read-only analyst only when data is sufficient. Do not create extra cron/heartbeat/model checks.
+- One independently approvable action = one Telegram card. Never combine different negatives, ads, budgets, or manual tasks in a single card.
+- Use marketer_status, marketer_context, marketer_proposal, marketer_propose, marketer_revise for this workflow. Read docs/MARKETER.md for schemas and limits.
+- Editing card B must not touch card A. Editing creates a new version; old approval buttons are invalid.
+- ALL live changes, including negative keywords, need explicit owner approval. Do not approve a card through exec/curl or manufacture sender identity. /yd native command handles the owner's actual Telegram click without a model.
+- Never infer confirmation from the existence of a proposal, a schedule, or this instruction file. Never use old automatic-negative routes for autonomous recommendations.
+- Advisory approval means an accepted manual task, NOT a completed Direct modification. Report this distinction accurately.
+- Analyze economy and purchase quality, demand/assortment, Search, RSYA, creatives, landings and experiments. Do not manufacture a recommendation for each area when evidence is absent.
+- Conversions are goal achievements, not confirmed paid orders or profit. Query relevance, conversion lag, sample size, attribution and learning risk matter.
+- Strategy settings are read from the account. Do not claim all campaigns pay per conversion: real strategy types differ.
+- The backend services are managed by systemd. Never start a second main.py/Telegram polling process or stop services to run a shell request.
+- Keep the existing user-requested campaign/draft/export workflows. Marketer analysis never creates, pauses or rebuilds campaigns by itself.
+
+
 ## INTERACTION RULE (CRITICAL):
 
 You must NEVER ask multiple inputs in one message.

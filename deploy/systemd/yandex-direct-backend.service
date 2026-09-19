@@ -1,0 +1,14 @@
+[Unit]
+Description=Yandex Direct Bot backend
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/appuser/.openclaw/workspace/yandex-direct-bot
+ExecStart=/home/appuser/.openclaw/ydbot
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=default.target

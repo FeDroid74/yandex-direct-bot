@@ -1,0 +1,8 @@
+[Unit]
+Description=Queue weekly campaign analysis
+Requires=yandex-direct-marketer.service
+After=yandex-direct-marketer.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/appuser/.openclaw/workspace/yandex-direct-bot/backend/marketer_trigger.py

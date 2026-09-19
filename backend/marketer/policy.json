@@ -1,0 +1,18 @@
+{
+  "counter_id": 99041859,
+  "goal_id": 352606262,
+  "campaign_ids": [],
+  "lookback_days": 28,
+  "conversion_lag_days": 7,
+  "min_clicks": 30,
+  "min_conversions": 2,
+  "min_new_clicks": 20,
+  "min_new_conversions": 1,
+  "min_negative_clicks": 20,
+  "min_strategy_conversions": 10,
+  "max_strategy_change_fraction": 0.2,
+  "max_proposals_per_run": 8,
+  "min_run_interval_days": 7,
+  "analyst_agent": "direct-marketer",
+  "openclaw_command": "/home/appuser/.npm-global/bin/openclaw"
+}

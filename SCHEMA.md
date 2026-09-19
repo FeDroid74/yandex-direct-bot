@@ -6,7 +6,7 @@
 - site_url (https://artfarfor.com only)
 - region
 - language = RU
-- placement_type (both only)
+- placement_type (search_only / network_only / both)
 - goal_type (leads / sales)
 - strategy_type = pay_for_conversion
 - metrica_goal_id
@@ -78,10 +78,11 @@ IF backend validation passes:
 ## AUTONOMY RULES
 
 AUTO:
-- add negative keywords
-- send reports
+- read Direct and Metrika statistics
+- prepare independent proposal cards
 
 CONFIRM REQUIRED:
+- add negative keywords (each phrase is an independent decision)
 - create campaign
 - launch campaign
 - change budget
@@ -108,7 +109,10 @@ Actions:
 - propose negatives
 - propose structure changes
 
-DO NOT APPLY without confirmation (except negatives)
+DO NOT APPLY any live changes without confirmation, including negatives.
+The autonomous marketer uses versioned Telegram cards and owner-only /yd decisions.
+Weekly collection is code-only; model analysis requires sufficient new mature data.
+See docs/MARKETER.md for operational policy and supported execution actions.
 
 ---
 

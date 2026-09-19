@@ -1,5 +1,6 @@
 from typing import Any, Optional
 import re
+import math
 
 
 def _normalize_query(value: Any) -> Optional[str]:
@@ -59,6 +60,15 @@ def _build_output_item(item: dict) -> dict:
     }
 
 
+def _known_number(value: Any) -> bool:
+    if value is None or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(str(value).replace(",", ".")))
+    except (ValueError, TypeError):
+        return False
+
+
 def analyze_search_terms(rows, target_cpa: Optional[float] = None):
     aggregated: dict[str, dict] = {}
 
@@ -78,12 +88,14 @@ def analyze_search_terms(rows, target_cpa: Optional[float] = None):
                 "clicks": 0,
                 "cost": 0.0,
                 "conversions": 0.0,
+                "conversions_known": True,
             },
         )
         item["impressions"] += _to_int(_get_value(row, "impressions", "Impressions"))
         item["clicks"] += _to_int(_get_value(row, "clicks", "Clicks"))
         item["cost"] += _to_float(_get_value(row, "cost", "Cost"))
         item["conversions"] += _to_float(_get_value(row, "conversions", "Conversions"))
+        item["conversions_known"] &= _known_number(_get_value(row, "conversions", "Conversions"))
 
     query_items = list(aggregated.values())
     for item in query_items:
@@ -107,11 +119,11 @@ def analyze_search_terms(rows, target_cpa: Optional[float] = None):
         if conversions > 0:
             top_performers.append(item)
 
-        if clicks > 0 and conversions == 0 and cost > 0:
+        if item["conversions_known"] and clicks > 0 and conversions == 0 and cost > 0:
             waste_queries.append(item)
 
-        is_negative_candidate = clicks >= 10 and conversions == 0
-        if target_cpa is not None and target_cpa > 0 and cost >= (2 * target_cpa):
+        is_negative_candidate = item["conversions_known"] and clicks >= 10 and conversions == 0
+        if item["conversions_known"] and conversions == 0 and target_cpa is not None and target_cpa > 0 and cost >= (2 * target_cpa):
             is_negative_candidate = True
         if is_negative_candidate:
             candidates_negative.append(item)
@@ -188,12 +200,14 @@ def build_negative_preview_candidates(rows, analysis: dict, target_cpa: Optional
                 "clicks": 0,
                 "cost": 0.0,
                 "conversions": 0.0,
+                "conversions_known": True,
                 "ad_group_ids": [],
             },
         )
         item["clicks"] += _to_int(_get_value(row, "clicks", "Clicks"))
         item["cost"] += _to_float(_get_value(row, "cost", "Cost"))
         item["conversions"] += _to_float(_get_value(row, "conversions", "Conversions"))
+        item["conversions_known"] &= _known_number(_get_value(row, "conversions", "Conversions"))
         if ad_group_id and ad_group_id not in item["ad_group_ids"]:
             item["ad_group_ids"].append(ad_group_id)
 
@@ -201,28 +215,23 @@ def build_negative_preview_candidates(rows, analysis: dict, target_cpa: Optional
     seen = set()
 
     for query, item in aggregated.items():
-        matched_tokens = [token for token in _extract_query_tokens(query) if token in IRRELEVANT_NEGATIVE_TOKENS]
+        if not item["conversions_known"] or item["conversions"] > 0:
+            continue
         is_negative_candidate = query in negative_queries
 
-        if not matched_tokens and not is_negative_candidate:
+        if not is_negative_candidate:
             continue
 
-        suggested_negative = matched_tokens[0] if matched_tokens else query
+        # A word such as "photo" is not proof that a porcelain query is irrelevant.
+        # Propose only the complete observed query, never broaden it to one token.
+        suggested_negative = query
         ad_group_ids = item["ad_group_ids"]
-        if matched_tokens:
-            level = "campaign"
-            ad_group_id = ""
-            if len(matched_tokens) == 1:
-                reason = f"Запрос содержит нерелевантный токен '{matched_tokens[0]}'."
-            else:
-                reason = f"Запрос содержит нерелевантные токены: {', '.join(matched_tokens)}."
+        level = "ad_group" if len(ad_group_ids) == 1 else "campaign"
+        ad_group_id = ad_group_ids[0] if level == "ad_group" else ""
+        if target_cpa is not None and target_cpa > 0 and item["cost"] >= (2 * target_cpa):
+            reason = f"Расход {round(item['cost'], 2)} без конверсий превысил двойной target CPA."
         else:
-            level = "ad_group" if len(ad_group_ids) == 1 else "campaign"
-            ad_group_id = ad_group_ids[0] if level == "ad_group" else ""
-            if target_cpa is not None and target_cpa > 0 and item["cost"] >= (2 * target_cpa) and item["conversions"] == 0:
-                reason = f"Расход {round(item['cost'], 2)} без конверсий превысил двойной target CPA."
-            else:
-                reason = "Запрос получил не менее 10 кликов без конверсий."
+            reason = "Запрос получил не менее 10 кликов без конверсий. Требуется проверка релевантности."
 
         signature = (query, suggested_negative, level, ad_group_id)
         if signature in seen:

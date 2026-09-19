@@ -1,0 +1,13 @@
+{
+  "id": "yandex-direct-marketer",
+  "name": "Yandex Direct Marketer",
+  "description": "Independent proposal cards and owner-only decisions",
+  "version": "1.0.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "configFile": {"type": "string"}
+    }
+  }
+}
