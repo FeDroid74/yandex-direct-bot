@@ -26,14 +26,18 @@ export default function (api: any) {
       if (!ctx.isAuthorizedSender || ctx.channel !== "telegram" || String(ctx.senderId).replace(/^telegram:/, "") !== String(config.owner_id)) {
         return { text: "Решения доступны только владельцу в Telegram." };
       }
-      const match = String(ctx.args ?? "").match(/^(approve|reject|defer|details|edit|done) ([a-f0-9]{12}) ([1-9][0-9]*)$/);
-      if (!match) return { text: "Используйте кнопки на конкретной карточке предложения." };
+      const match = String(ctx.args ?? "").match(/^(approve|reject|defer|details|edit|done) ([a-f0-9]{12}) ([1-9][0-9]*)(?: ([1-9][0-9]*))?$/);
+      if (!match || (match[4] && match[1] !== "details") || !Number.isSafeInteger(Number(match[3])) ||
+          (match[4] && !Number.isSafeInteger(Number(match[4])))) {
+        return { text: "Используйте кнопки на конкретной карточке предложения." };
+      }
       try {
         const result = await post("/decision", {
           decision: match[1], id: match[2], revision: Number(match[3]),
           sender_id: String(config.owner_id), channel: "telegram",
+          ...(match[4] ? { page: Number(match[4]) } : {}),
         }, true);
-        return { text: result.text };
+        return { text: result.text, ...(result.buttons?.length ? { channelData: { telegram: { buttons: result.buttons } } } : {}) };
       } catch (error) {
         return { text: `Решение не подтверждено: ${String(error)}` };
       }

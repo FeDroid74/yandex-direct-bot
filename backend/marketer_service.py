@@ -10,7 +10,7 @@ from marketer.actions import Actions
 from marketer.data import DataSource
 from marketer.runner import Runner
 from marketer.store import Conflict, Store
-from marketer.telegram import Telegram, card
+from marketer.telegram import Telegram, card, detail_response
 
 
 ROOT = Path(__file__).resolve().parent
@@ -89,10 +89,14 @@ def serve():
                     if str(params.get("sender_id")) != str(config["owner_id"]) or params.get("channel") != "telegram":
                         raise PermissionError("Only the Telegram owner may decide")
                     pid, revision, decision_name = params["id"], params["revision"], params["decision"]
+                    if "page" in params and decision_name != "details":
+                        raise ValueError("Страница допустима только для подробностей.")
                     row = store.get(pid)
                     if decision_name in ("details", "edit"):
-                        result = {"text": card(row, details=True) if decision_name == "details" else
-                                  f"Напишите: «Измени карточку {pid}: ...». Бот подготовит новую версию; она потребует отдельного подтверждения. Остальные карточки не изменятся."}
+                        if row["revision"] != revision:
+                            raise Conflict("Карточка обновлена. Используйте кнопки её актуальной версии.")
+                        result = detail_response(row, params.get("page", 1)) if decision_name == "details" else {
+                            "text": f"Напишите: «Измени карточку {pid}: ...». Бот подготовит новую версию; она потребует отдельного подтверждения. Остальные карточки не изменятся."}
                     else:
                         row = actions.decide(pid, revision, decision_name, str(params["sender_id"]))
                         try:

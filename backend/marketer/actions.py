@@ -5,6 +5,7 @@ import time
 
 from marketer.data import checked, number
 from marketer.store import Conflict
+from marketer.telegram import card
 
 
 AREAS = {"economics", "search", "rsya", "creative", "landing", "assortment", "experiment", "measurement"}
@@ -106,7 +107,7 @@ class Actions:
         days = integer(raw.get("evaluate_after_days", 28), "evaluate_after_days")
         if not 14 <= days <= 90:
             raise ValueError("Evaluation window must be 14..90 days")
-        return {"campaign_id": cid, "campaign_name": campaign["Name"], "area": area,
+        body = {"campaign_id": cid, "campaign_name": campaign["Name"], "area": area,
                 "title": text(raw.get("title"), "title", 180),
                 "reason": text(raw.get("reason"), "reason"),
                 "expected_effect": text(raw.get("expected_effect"), "expected_effect", 800),
@@ -117,6 +118,9 @@ class Actions:
                              "strategy_goals": campaign.get("strategy_goals", []),
                              "attribution": campaign["attribution"], "current": campaign["current"],
                              "previous": campaign["previous"], "limits": snapshot["limits"]}}
+        # Never store a proposal whose exact action would be hidden by Telegram's limit.
+        card({"id": "0" * 12, "revision": 999999, "state": "uncertain", "body": body})
+        return body
 
     def execute(self, row):
         body = row["body"]

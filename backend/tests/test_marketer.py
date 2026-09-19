@@ -1,4 +1,5 @@
 import copy
+import io
 import json
 import tempfile
 import time
@@ -6,12 +7,12 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from marketer.actions import Actions
 from marketer.data import DataSource, sufficient, totals
 from marketer.store import Conflict, Store
-from marketer.telegram import buttons, card
+from marketer.telegram import action_text, buttons, card, detail_pages, detail_response, split_text, summary, telegram_length
 from services.search_terms_analyzer import analyze_search_terms, build_negative_preview_candidates
 
 
@@ -218,6 +219,165 @@ class ProposalTests(unittest.TestCase):
         for line in buttons(row):
             for button in line:
                 self.assertLessEqual(len(button["callback_data"].encode()), 64)
+
+
+class CardTests(unittest.TestCase):
+    def row(self, kind="advisory"):
+        body = Actions(FakeSource(), None, POLICY).prepare(proposal(kind), snapshot())
+        return {"id": "abcdef123456", "revision": 1, "state": "pending", "body": body}
+
+    def test_full_manual_criterion_and_single_hypothesis_label(self):
+        row = self.row()
+        body = row["body"]
+        body["expected_effect"] = "Гипотеза: Гипотеза: тестовое действие видно в Метрике."
+        body["success_metric"] = "Успех — " + "цель отображается корректно; " * 10 + "проверить повторно."
+        original = copy.deepcopy(row)
+        for output in (card(row), detail_response(row)["text"]):
+            self.assertEqual(output.count("Гипотеза:"), 1)
+            self.assertIn(body["success_metric"], output)
+            self.assertIn("Критерий выполнения:", output)
+            self.assertNotIn("Оценка через", output)
+            self.assertNotIn("Исходные параметры", output)
+            self.assertNotIn("\\", output)
+        self.assertEqual(row, original)
+
+    def test_automatic_action_keeps_evaluation_window(self):
+        row = self.row("strategy_value")
+        self.assertIn("Оценка через 28 дней:", card(row))
+        self.assertIn("Исходные параметры:", detail_response(row)["text"])
+
+    def test_unknown_zero_is_not_reported_as_zero_conversions(self):
+        row = self.row()
+        row["body"]["evidence"]["current"].update(Conversions=0, ConversionsComplete=False)
+        for output in (card(row), detail_response(row)["text"]):
+            self.assertIn("итог неизвестен", output)
+            self.assertIn("Считать это нулём нельзя", output)
+            self.assertNotIn("не менее 0", output)
+            self.assertNotIn("0 достижений", output)
+
+    def test_known_zero_and_positive_lower_bound(self):
+        row = self.row()
+        stats = row["body"]["evidence"]["current"]
+        stats.update(Conversions=0, ConversionsComplete=True)
+        self.assertIn("0 достижений", card(row))
+        stats.update(Conversions=2, ConversionsComplete=False)
+        self.assertIn("подтверждено не менее 2 достижений", card(row))
+
+    def test_summary_uses_whole_words_and_explicit_ellipsis(self):
+        self.assertEqual(summary("Один два три четыре", 12), "Один два…")
+        self.assertEqual(summary("Один два", 12), "Один два")
+        self.assertEqual(summary("оченьдлинноесловобезпробелов", 12), "…")
+
+    def test_pagination_preserves_all_text_and_unicode(self):
+        text = ("Факты: " + chr(0x1F600) + "\nполные данные " * 50 + "\n\n") * 40
+        pages = split_text(text, 400)
+        self.assertEqual("".join(pages), text)
+        self.assertTrue(all(telegram_length(page) <= 400 for page in pages))
+        unbroken = chr(0x1F600) * 1000
+        self.assertEqual("".join(split_text(unbroken, 401)), unbroken)
+
+    def test_long_details_have_versioned_navigation_and_full_ending(self):
+        row = self.row()
+        row["body"]["reason"] = "Наблюдаемые факты. " * 200
+        row["body"]["success_metric"] = "Полный критерий успеха. " * 60 + "ПОСЛЕДНЕЕ СЛОВО."
+        row["body"]["evidence"]["limits"] = ["Важное ограничение. " * 100]
+        row["result"] = {"error": "Диагностика. " * 200 + "КОНЕЦ РЕЗУЛЬТАТА."}
+        pages = detail_pages(row)
+        self.assertGreater(len(pages), 1)
+        all_text = "".join(page.split("\n\n", 1)[1] for page in pages)
+        for key in ("reason", "success_metric"):
+            self.assertIn(row["body"][key], all_text)
+        self.assertIn(row["result"]["error"], all_text)
+        self.assertIn(row["body"]["evidence"]["limits"][0], all_text)
+        for index, page in enumerate(pages, 1):
+            self.assertLessEqual(telegram_length(page), 4000)
+            response = detail_response(row, index)
+            self.assertEqual(response["text"], page)
+            expected_targets = [i for i in (index - 1, index + 1) if 1 <= i <= len(pages)]
+            self.assertEqual([int(b["callback_data"].split()[-1]) for b in response["buttons"][0]], expected_targets)
+            for button in response["buttons"][0]:
+                self.assertIn("/yd details abcdef123456 1 ", button["callback_data"])
+                self.assertLessEqual(len(button["callback_data"].encode()), 64)
+        self.assertIn(action_text(row["body"]), card(row))
+        for warning in row["body"]["warnings"]:
+            self.assertIn(warning, card(row))
+
+    def test_invalid_page_is_rejected(self):
+        row = self.row()
+        for value in (0, -1, 2, True, 1.0, "1", None):
+            with self.assertRaises(ValueError):
+                detail_response(row, value)
+        self.assertEqual(detail_response(row)["buttons"], [])
+
+    def test_oversized_exact_action_is_rejected_before_storage(self):
+        raw = proposal("advisory")
+        raw["action"]["task"] = chr(0x1F600) * 1800
+        raw["title"] = "Название " * 20
+        with self.assertRaisesRegex(ValueError, "Точное действие"):
+            Actions(FakeSource(), None, POLICY).prepare(raw, snapshot())
+
+    def test_main_card_keeps_long_action_and_all_warnings(self):
+        row = self.row()
+        row["body"]["action"]["task"] = "Проверить вручную. " * 95
+        row["body"]["reason"] = "Наблюдаемые факты. " * 88
+        row["body"]["expected_effect"] = "Ожидаемое улучшение. " * 38
+        row["body"]["success_metric"] = "Тестовое действие. " * 40
+        output = card(row)
+        self.assertLessEqual(telegram_length(output), 4000)
+        self.assertIn(action_text(row["body"]), output)
+        self.assertIn("\n".join(row["body"]["warnings"]), output)
+
+
+class CardEndpointTests(unittest.TestCase):
+    def setUp(self):
+        import marketer_service
+        self.row = CardTests().row()
+        self.row["body"]["evidence"]["limits"] = ["Полное ограничение. " * 400]
+        self.store = Mock()
+        self.store.get.return_value = self.row
+        self.actions, self.telegram = Mock(), Mock()
+        config = {"api_key": "read-test", "decision_key": "decision-test", "owner_id": "42"}
+
+        def server(_address, handler):
+            self.handler_class = handler
+            return SimpleNamespace(serve_forever=lambda: None)
+
+        with patch.object(marketer_service, "build_app", return_value=(self.store, self.actions, None, self.telegram, config)), \
+                patch.object(marketer_service, "ThreadingHTTPServer", side_effect=server):
+            marketer_service.serve()
+
+    def request(self, **overrides):
+        params = {"id": self.row["id"], "revision": 1, "decision": "details", "sender_id": "42", "channel": "telegram", **overrides}
+        data = json.dumps(params).encode()
+        handler = self.handler_class.__new__(self.handler_class)
+        handler.path = "/decision"
+        handler.headers = {"Authorization": "Bearer decision-test", "Content-Length": str(len(data))}
+        handler.rfile, handler.wfile = io.BytesIO(data), io.BytesIO()
+        handler.send_response, handler.send_header, handler.end_headers = Mock(), Mock(), Mock()
+        handler.do_POST()
+        return handler.send_response.call_args.args[0], json.loads(handler.wfile.getvalue())
+
+    def test_paged_read_endpoint_never_executes_or_sends(self):
+        status, response = self.request(page=2)
+        self.assertEqual(status, 200)
+        self.assertEqual(response["page"], 2)
+        self.assertIn("Подробности · 2/", response["text"])
+        self.assertTrue(response["buttons"])
+        self.actions.decide.assert_not_called()
+        self.telegram.refresh.assert_not_called()
+
+    def test_page_cannot_be_used_with_a_mutation(self):
+        for decision in ("approve", "reject", "defer", "edit", "done"):
+            self.assertEqual(self.request(decision=decision, page=1)[0], 400)
+        self.actions.decide.assert_not_called()
+
+    def test_details_require_current_revision_and_owner(self):
+        self.assertEqual(self.request(revision=2)[0], 409)
+        self.assertEqual(self.request(sender_id="43")[0], 403)
+        self.assertEqual(self.request(channel="discord")[0], 403)
+        for page in (True, "1", 0, 999):
+            self.assertEqual(self.request(page=page)[0], 400)
+        self.actions.decide.assert_not_called()
 
 
 class AnalyticsTests(unittest.TestCase):
