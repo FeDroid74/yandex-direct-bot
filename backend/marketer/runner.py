@@ -3,11 +3,30 @@ import json
 import subprocess
 import time
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from marketer.data import sufficient, totals
 from marketer.store import digest
+from marketer.schedule import weekly_slot
+
+
+AREAS = {"economics", "search", "rsya", "creative", "landing", "assortment", "experiment", "measurement"}
+
+
+def sample_rows(rows, limit=12):
+    selected = []
+    scores = [max([r.get("Conversions") or 0] + [v or 0 for v in r.get("conversions_by_goal", {}).values()]) for r in rows]
+    converting = sorted((i for i in range(len(rows)) if scores[i] > 0), key=lambda i: scores[i], reverse=True)
+    for ranked in (converting[:limit//3], sorted(range(len(rows)), key=lambda i: rows[i].get("Clicks", 0), reverse=True)[:limit//3],
+                   sorted(range(len(rows)), key=lambda i: (rows[i].get("Cost", 0), rows[i].get("Clicks", 0)), reverse=True)):
+        for index in ranked:
+            if index not in selected:
+                selected.append(index)
+            if len(selected) == limit:
+                return [rows[i] for i in selected]
+    return [rows[i] for i in selected]
 
 
 class Runner:
@@ -26,19 +45,32 @@ class Runner:
         compact = copy.deepcopy(snapshot)
         for c in compact["campaigns"]:
             c.pop("daily", None)
+            c.pop("period_reports", None)
+            diagnosis = c.get("diagnostics", {})
+            diagnosis.pop("limits", None)
+            diagnosis.pop("independent_analysis", None)
+            for goal in diagnosis.get("goals", {}).values():
+                for key in ("direct", "metrika", "counter_all_traffic"):
+                    goal.pop(key, None)
+            for group in c["groups"]:
+                group.pop("CampaignId", None)
+                negatives = (group.pop("NegativeKeywords", None) or {}).get("Items", [])
+                group["negative_keywords_count"] = len(negatives)
+                group["negative_keywords_sample"] = negatives[:5]
             for key in ("queries", "ad_performance", "placements"):
                 rows = c.get(key, [])
                 c[key+"_total_rows"] = len(rows)
-                # Send leading spend and converting rows; raw data remains in SQLite.
-                ranked = sorted(rows, key=lambda r: ((r.get("Conversions") or 0) > 0, r.get("Cost", 0), r.get("Clicks", 0)), reverse=True)
-                c[key] = [{k: v for k, v in r.items() if not k.startswith("Conversions_")} for r in ranked[:12]]
+                # Include high-click rows even when conversion billing leaves their cost at zero.
+                c[key] = [{k: v for k, v in r.items() if not k.startswith("Conversions_") and k not in ("raw_conversions_by_goal", "CampaignId")} for r in sample_rows(rows)]
             c["ads_total_rows"] = len(c["ads"])
             ad_ids = {int(r["AdId"]) for r in c["ad_performance"][:10]}
             c["ads"] = sorted(c["ads"], key=lambda a: a["Id"] in ad_ids, reverse=True)[:6]
+            for ad in c["ads"]:
+                ad.pop("CampaignId", None)
             for key in ("metrika_queries", "landing_pages"):
                 if key in c:
                     c[key]["total_rows"] = len(c[key]["rows"])
-                    c[key]["rows"] = c[key]["rows"][:8]
+                    c[key]["rows"] = [{k: v for k, v in r.items() if k != "dimension_key"} for r in c[key]["rows"][:8]]
         history = [{"id": r["id"], "state": r["state"], "title": r["body"]["title"],
                     "campaign_id": r["body"]["campaign_id"], "action": r["body"]["action"]} for r in self.store.list(40)]
         compact["model_input_sampled"] = True
@@ -66,6 +98,9 @@ class Runner:
                                     json.dumps(params, ensure_ascii=False), "--expect-final", "--timeout", "630000", "--json"],
                                    capture_output=True, text=True, timeout=660)
         if completed.returncode:
+            if "OAuth token refresh failed" in completed.stderr:
+                self.store.set_setting("analyst_auth", {"status": "reauthentication_required", "checked_at": time.time()})
+                raise RuntimeError("OpenClaw требует повторного входа в ChatGPT: OAuth не обновляется. Доступ к Директу и Метрике от этого не зависит; рекламные изменения не выполнялись.")
             raise RuntimeError("OpenClaw analyst failed: " + completed.stderr[-1000:])
         output = completed.stdout
         # The CLI can prepend plugin registration logs before its JSON response.
@@ -92,6 +127,14 @@ class Runner:
             raise ValueError("Invalid analyst output")
         if len(result["proposals"]) > self.policy["max_proposals_per_run"]:
             raise ValueError("Too many proposals; no cards published")
+        coverage = result.get("coverage")
+        if not isinstance(coverage, dict) or set(coverage) != AREAS:
+            raise ValueError("Analyst must explicitly review all marketing areas")
+        for area, review in coverage.items():
+            if (not isinstance(review, dict) or review.get("status") not in ("proposal", "no_action", "insufficient_data") or
+                    not isinstance(review.get("reason"), str) or not 1 <= len(review["reason"].strip()) <= 600):
+                raise ValueError("Invalid marketing coverage: " + area)
+        self.store.set_setting("analyst_auth", {"status": "ready", "checked_at": time.time()})
         return result
 
     def evaluations(self):
@@ -102,11 +145,12 @@ class Runner:
             if time.time() < due:
                 continue
             e = row["body"]["evidence"]
-            start = datetime.fromtimestamp(row["applied_at"]).date() + timedelta(days=1)
-            end = date.today() - timedelta(days=self.policy["conversion_lag_days"]+1)
+            report_timezone = ZoneInfo(self.policy.get("report_timezone", "Europe/Moscow"))
+            start = datetime.fromtimestamp(row["applied_at"], report_timezone).date() + timedelta(days=1)
+            end = datetime.now(report_timezone).date() - timedelta(days=self.policy["conversion_lag_days"]+1)
             rows = self.source.report(row["body"]["campaign_id"], start.isoformat(), end.isoformat(),
-                                      "CAMPAIGN_PERFORMANCE_REPORT", ["Date", "CampaignId"], e["goal_id"], e["attribution"])
-            after = totals(rows)
+                                      "CAMPAIGN_PERFORMANCE_REPORT", ["CampaignId"], e["goal_id"], e["attribution"], e.get("strategy_goals"))
+            after = totals(rows, e.get("strategy_goals", []))
             if (after["Conversions"] < 5 or not after["ConversionsComplete"]) and time.time() < row["applied_at"]+90*86400:
                 continue
             data = {"before": e["current"], "after": after, "date_from": start.isoformat(), "date_to": end.isoformat(),
@@ -117,9 +161,14 @@ class Runner:
                                  + data["conclusion"] + ("\nВыборка недостаточна или неполна; итог не определён." if after["Conversions"] < 5 or not after["ConversionsComplete"] else ""))
             self.store.evaluate(row["id"], data)
 
-    def run(self, force=False, collect_only=False):
+    def run(self, force=False, collect_only=False, scheduled=False):
         last = self.store.setting("last_attempt", 0)
-        if not force and time.time()-last < self.policy["min_run_interval_days"]*86400 - 300:
+        slot = weekly_slot(time.time(), self.policy.get("schedule_timezone", "Europe/Podgorica")) if scheduled else None
+        if scheduled and (force or collect_only):
+            raise ValueError("Scheduled analysis cannot be forced or collection-only")
+        if scheduled and not self.store.claim_schedule(slot):
+            return {"status": "already_scheduled", "schedule_slot": slot}
+        if not scheduled and not force and time.time()-last < self.policy["min_run_interval_days"]*86400 - 300:
             return {"status": "not_due"}
         self.store.set_setting("last_attempt", time.time())
         run_id = uuid.uuid4().hex[:16]
@@ -127,8 +176,11 @@ class Runner:
         try:
             snapshot = self.source.collect()
             snapshot["run_id"] = run_id
+            snapshot["schedule_slot"] = slot
             self.store.set_setting("latest_snapshot", snapshot)
             allowed, reason = sufficient(snapshot, self.store.setting("last_analyzed_snapshot"), self.policy)
+            if slot in self.policy.get("required_review_slots", []) and sufficient(snapshot, None, self.policy)[0]:
+                allowed, reason = True, "owner_requested_calendar_review"
             self.store.save_run(run_id, "collected", {"snapshot": snapshot, "gate": reason})
             if snapshot["errors"]:
                 self.notify_once("data_errors", "Анализ Директа: часть данных недоступна. Для этих кампаний решения не формируются.\n" + json.dumps(snapshot["errors"], ensure_ascii=False)[:2500])
@@ -150,7 +202,8 @@ class Runner:
                 except (ValueError, KeyError) as exc:
                     rejected.append({"title": str(raw.get("title", ""))[:180] if isinstance(raw, dict) else "invalid", "error": str(exc)[:500]})
             self.store.set_setting("last_analyzed_snapshot", snapshot)
-            self.store.save_run(run_id, "complete", {"snapshot": snapshot, "summary": analysis.get("summary"), "published": published, "rejected": rejected, "model_called": True})
+            self.store.save_run(run_id, "complete", {"snapshot": snapshot, "summary": analysis.get("summary"), "coverage": analysis.get("coverage"),
+                                                     "published": published, "rejected": rejected, "model_called": True})
             return {"status": "complete", "run_id": run_id, "published": published, "rejected": rejected}
         except Exception as exc:
             error = str(exc)[:1600]

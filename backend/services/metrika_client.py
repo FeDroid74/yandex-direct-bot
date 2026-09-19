@@ -9,7 +9,10 @@ from config import settings
 
 
 class YandexMetrikaClientError(Exception):
-    pass
+    def __init__(self, message, *, status=None, payload=None):
+        super().__init__(message)
+        self.status = status
+        self.payload = payload or {}
 
 
 class YandexMetrikaClient:
@@ -76,7 +79,7 @@ class YandexMetrikaClient:
             except json.JSONDecodeError:
                 parsed_error = {"raw_error": raw_error}
             raise YandexMetrikaClientError(
-                f"HTTP {e.code}: {json.dumps(parsed_error, ensure_ascii=False)}"
+                f"HTTP {e.code}: {json.dumps(parsed_error, ensure_ascii=False)}", status=e.code, payload=parsed_error
             ) from e
         except urllib.error.URLError as e:
             raise YandexMetrikaClientError(f"Connection error: {e.reason}") from e

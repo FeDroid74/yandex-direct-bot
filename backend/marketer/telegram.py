@@ -61,15 +61,41 @@ def action_text(body):
 
 def facts(body):
     e, stats = body["evidence"], body["evidence"]["current"]
-    goal = f"Цель {e['goal_id']} (Директ): "
+    goals = e.get("goals", {})
+    main = goals.get(str(e["goal_id"]), {})
+    goal = f"{main.get('name', 'Цель ' + str(e['goal_id']))} (Директ): "
     if stats.get("ConversionsComplete", True):
-        goal += f"{stats['Conversions']:g} достижений."
+        goal += f"{stats['Conversions']:g} целевых визитов."
     elif stats["Conversions"] > 0:
-        goal += f"подтверждено не менее {stats['Conversions']:g} достижений; полная сумма недоступна."
+        goal += f"подтверждено не менее {stats['Conversions']:g} целевых визитов; полная сумма недоступна."
     else:
         goal += "итог неизвестен, часть значений недоступна. Считать это нулём нельзя."
+    supporting = []
+    for gid, item in goals.items():
+        if gid != str(e["goal_id"]):
+            value = (item.get("direct") or {}).get("current") or {}
+            label = f"{value['confirmed_sum']:g}" if value.get("complete") else "итог неизвестен"
+            supporting.append(f"Вспомогательная цель «{item['name']}»: {label} (целевые визиты Директа).")
     return (f"Факты {e['date_from']} — {e['date_to']}: {stats['Clicks']:g} кликов; {stats['Cost']:g} руб.\n"
-            f"{goal} Атрибуция Директа: {e['attribution']}.")
+            f"{goal} Атрибуция Директа: {e['attribution']}." +
+            ("\n" + "\n".join(supporting[:2]) if supporting else "") +
+            ("\nОстальные цели приведены в подробностях." if len(supporting) > 2 else ""))
+
+
+def goal_details(goals):
+    parts = []
+    for gid, goal in goals.items():
+        role = "основной бизнес-сигнал" if goal["role"] == "primary_business_signal" else "вспомогательный сигнал, не продажа"
+        lines = [f"{goal['name']} ({gid}): {role}."]
+        for period, label in (("current", "Текущий период"), ("previous", "Предыдущий период")):
+            direct = goal["direct"].get(period) or {}
+            count = f"{direct['confirmed_sum']:g}" if direct.get("complete") else "итог неизвестен"
+            lines.append(f"{label}. Директ: {count} (целевые визиты).")
+            for source, name in (("metrika", "Метрика по кампании, lastsign"), ("counter_all_traffic", "Весь счётчик, все источники")):
+                values = goal[source].get(period)
+                lines.append(f"{name}: " + (f"{values['visits']:g} целевых визитов, {values['reaches']:g} достижений." if values else "данные недоступны."))
+        parts.append("\n".join(lines))
+    return "\n\n".join(parts)
 
 
 def explanation(body):
@@ -99,6 +125,8 @@ def detail_pages(row):
     parts = [b["title"], f"{b['campaign_name']} ({b['campaign_id']})", action_text(b), facts(b)]
     parts += [f"{label}: {value}" for label, value, _ in explanation(b)]
     parts.append("\n".join(b["warnings"]))
+    if b["evidence"].get("goals"):
+        parts.append("Цели раздельно (их нельзя складывать):\n" + goal_details(b["evidence"]["goals"]))
     if b["evidence"].get("limits"):
         parts.append("Ограничения:\n" + "\n".join(b["evidence"]["limits"]))
     if b.get("before"):

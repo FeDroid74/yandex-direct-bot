@@ -253,15 +253,15 @@ class CardTests(unittest.TestCase):
             self.assertIn("итог неизвестен", output)
             self.assertIn("Считать это нулём нельзя", output)
             self.assertNotIn("не менее 0", output)
-            self.assertNotIn("0 достижений", output)
+            self.assertNotIn("0 целевых визитов", output)
 
     def test_known_zero_and_positive_lower_bound(self):
         row = self.row()
         stats = row["body"]["evidence"]["current"]
         stats.update(Conversions=0, ConversionsComplete=True)
-        self.assertIn("0 достижений", card(row))
+        self.assertIn("0 целевых визитов", card(row))
         stats.update(Conversions=2, ConversionsComplete=False)
-        self.assertIn("подтверждено не менее 2 достижений", card(row))
+        self.assertIn("подтверждено не менее 2 целевых визитов", card(row))
 
     def test_summary_uses_whole_words_and_explicit_ellipsis(self):
         self.assertEqual(summary("Один два три четыре", 12), "Один два…")

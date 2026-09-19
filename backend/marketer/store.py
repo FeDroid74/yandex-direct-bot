@@ -172,6 +172,12 @@ class Store:
         with self.db() as db:
             db.execute("INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, encode(value)))
 
+    def claim_schedule(self, slot):
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            return db.execute("INSERT OR IGNORE INTO settings VALUES(?,?)",
+                              ("scheduled_slot:" + slot, encode({"started": time.time()}))).rowcount == 1
+
     def evaluate(self, pid, data):
         with self.db() as db:
             row = self.get(pid)

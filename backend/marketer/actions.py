@@ -51,6 +51,10 @@ class Actions:
             raise ValueError("Unknown marketing area")
         action = copy.deepcopy(raw["action"])
         kind = action.get("kind")
+        if snapshot.get("schema_version", 1) >= 2 and kind in ("add_negative", "strategy_value"):
+            diagnosis = campaign.get("diagnostics", {})
+            if not diagnosis.get("counter_linked") or not diagnosis.get("goals") or any(g.get("present") is not True for g in diagnosis["goals"].values()):
+                raise ValueError("Verify campaign counter and selected goals before traffic or strategy changes")
         before, warnings = {}, []
         if kind == "add_negative":
             only(action, {"kind", "ad_group_id", "phrase"})
@@ -89,6 +93,8 @@ class Actions:
             side = unified["BiddingStrategy"].get(action["side"], {})
             if unified.get("PackageBiddingStrategy") or side.get("BiddingStrategyType") != "PAY_FOR_CONVERSION":
                 raise ValueError("Unsupported or portfolio strategy: submit an advisory instead")
+            if side.get("PayForConversion", {}).get("GoalId") != campaign["goal_id"]:
+                raise ValueError("Supporting-goal strategy changes require an advisory; primary-goal statistics cannot justify them")
             current = side.get("PayForConversion", {}).get(action["field"])
             value = integer(action["value_micros"], "value_micros")
             if not current or value == current or abs(value/current-1) > self.policy["max_strategy_change_fraction"]:
@@ -117,7 +123,8 @@ class Actions:
                              "date_to": snapshot["date_to"], "goal_id": campaign["goal_id"],
                              "strategy_goals": campaign.get("strategy_goals", []),
                              "attribution": campaign["attribution"], "current": campaign["current"],
-                             "previous": campaign["previous"], "limits": snapshot["limits"]}}
+                             "previous": campaign["previous"], "limits": snapshot["limits"],
+                             "goals": campaign.get("diagnostics", {}).get("goals", {})}}
         # Never store a proposal whose exact action would be hidden by Telegram's limit.
         card({"id": "0" * 12, "revision": 999999, "state": "uncertain", "body": body})
         return body

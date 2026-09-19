@@ -37,10 +37,12 @@ elif mode == "analyze":
             valid.append(actions.prepare(raw, snapshot))
         except Exception as exc:
             invalid.append({"title": raw.get("title"), "error": str(exc)})
-    store.set_setting("deployment_analysis", {"analysis": analysis, "valid": valid, "invalid": invalid})
-    print(json.dumps({"summary": analysis.get("summary"), "valid": [{"title": p["title"], "action": p["action"]} for p in valid], "invalid": invalid}, ensure_ascii=False))
+    store.set_setting("deployment_analysis", {"snapshot_run_id": snapshot["run_id"], "analysis": analysis, "valid": valid, "invalid": invalid})
+    print(json.dumps({"summary": analysis.get("summary"), "coverage": analysis.get("coverage"), "valid": [{"title": p["title"], "action": p["action"]} for p in valid], "invalid": invalid}, ensure_ascii=False))
 elif mode == "publish":
     result = store.setting("deployment_analysis")
+    if result.get("snapshot_run_id") != store.setting("latest_snapshot")["run_id"]:
+        raise ValueError("Collected snapshot changed after analysis; do not publish stale deployment results")
     published = []
     for body in result["valid"]:
         row, fresh = store.create(body)
@@ -51,4 +53,4 @@ elif mode == "publish":
     store.set_setting("last_analyzed_snapshot", store.setting("latest_snapshot"))
     snapshot = store.setting("latest_snapshot")
     store.save_run(snapshot["run_id"], "complete", {"snapshot": snapshot, "summary": result["analysis"].get("summary"),
-                                                   "published": published, "rejected": result["invalid"], "model_called": True})
+                                                   "coverage": result["analysis"].get("coverage"), "published": published, "rejected": result["invalid"], "model_called": True})

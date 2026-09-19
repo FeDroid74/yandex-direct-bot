@@ -68,8 +68,10 @@ def serve():
                 if not isinstance(params, dict):
                     raise ValueError("Expected JSON object")
                 if self.path == "/status":
-                    runs = [{k: v for k, v in r.items() if k != "data"} for r in store.runs()]
-                    result = {"runs": runs, "policy": runner.policy, "proposals": [{"id": r["id"], "revision": r["revision"], "state": r["state"], "title": r["body"]["title"]} for r in store.list(50)]}
+                    runs = [{**{k: v for k, v in r.items() if k != "data"}, "coverage": r["data"].get("coverage"),
+                             "summary": r["data"].get("summary"), "model_called": r["data"].get("model_called")} for r in store.runs()]
+                    result = {"runs": runs, "policy": runner.policy, "analyst_auth": store.setting("analyst_auth", {"status": "not_checked"}),
+                              "proposals": [{"id": r["id"], "revision": r["revision"], "state": r["state"], "title": r["body"]["title"]} for r in store.list(50)]}
                 elif self.path == "/context":
                     result = runner.context(store.setting("latest_snapshot"))
                 elif self.path == "/proposal":
@@ -109,7 +111,8 @@ def serve():
                         raise Conflict("Анализ уже выполняется.")
                     def work():
                         try:
-                            runner.run(force=params.get("force") is True, collect_only=params.get("collect_only") is True)
+                            runner.run(force=params.get("force") is True, collect_only=params.get("collect_only") is True,
+                                       scheduled=params.get("scheduled") is True)
                         except Exception:
                             pass  # Runner persists and notifies the failure.
                         finally:
