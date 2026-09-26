@@ -1,0 +1,58 @@
+{
+  "drafts": [
+    {
+      "name": "Товары | Военная история | ArtFarfor",
+      "feed_url": "https://artfarfor.com/marketplace/4675993.xml?download=true",
+      "placement_type": "search_only",
+      "region_ids": [225],
+      "target_cpa_rub": "1000",
+      "weekly_budget_rub": "20000",
+      "groups": [
+        {
+          "name": "Полководцы и солдаты",
+          "category_ids": ["30350017"],
+          "default_text": "Военные статуэтки из фарфора. Выберите предмет для коллекции в ArtFarfor.",
+          "offer_ids": []
+        }
+      ]
+    },
+    {
+      "name": "Товары | Клоуны и арлекины | ArtFarfor",
+      "feed_url": "https://artfarfor.com/marketplace/4675993.xml?download=true",
+      "placement_type": "search_only",
+      "region_ids": [225],
+      "target_cpa_rub": "1000",
+      "weekly_budget_rub": "20000",
+      "groups": [
+        {
+          "name": "Клоуны, арлекины и комедианты",
+          "category_ids": ["30350019"],
+          "default_text": "Фарфоровые клоуны и арлекины для коллекции и подарка. Каталог ArtFarfor.",
+          "offer_ids": []
+        }
+      ]
+    },
+    {
+      "name": "Товары | Lladro и английский фарфор | ArtFarfor",
+      "feed_url": "https://artfarfor.com/marketplace/4675993.xml?download=true",
+      "placement_type": "search_only",
+      "region_ids": [225],
+      "target_cpa_rub": "1000",
+      "weekly_budget_rub": "20000",
+      "groups": [
+        {
+          "name": "Фарфор Lladro",
+          "category_ids": ["30350093"],
+          "default_text": "Фарфор Lladro для коллекции и интерьера. Выберите свой предмет в ArtFarfor.",
+          "offer_ids": []
+        },
+        {
+          "name": "Royal Doulton, Royal Worcester, Coalport",
+          "category_ids": ["30350020"],
+          "default_text": "Royal Doulton, Royal Worcester и Coalport. Коллекционный фарфор в ArtFarfor.",
+          "offer_ids": []
+        }
+      ]
+    }
+  ]
+}
