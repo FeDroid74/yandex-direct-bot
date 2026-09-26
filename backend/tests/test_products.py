@@ -5,7 +5,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from marketer.actions import Actions
 from marketer.catalog import parse_yml, select_offers, shop_url
@@ -50,6 +50,7 @@ class FakeDirect:
         self.items = {"feeds": [{"Id": 5, "SourceType": "URL", "BusinessType": "RETAIL", "Status": "DONE", "NumberOfItems": 1, "UrlFeed": {"Url": URL}}],
                       "campaigns": [], "adgroups": [], "ads": [], "keywords": []}
         self.writes, self.next_id, self.fail = [], 100, None
+        self.feed_readback = {}
 
     def entities(self, service, key, params):
         criteria = params.get("SelectionCriteria", {})
@@ -80,6 +81,7 @@ class FakeDirect:
                     item.update(CampaignId=group["CampaignId"], Type="SHOPPING_AD", State="OFF", Status="DRAFT")
                 if service == "feeds":
                     item.update(Status="NEW", NumberOfItems=0)
+                    item.update(copy.deepcopy(self.feed_readback))
                 if service == "keywords":
                     item.update(State="ON")
                 self.items[service].append(item)
@@ -197,6 +199,95 @@ class ProductTests(unittest.TestCase):
         saved = self.products.save_draft(draft())
         with self.assertRaises(Conflict):
             self.propose({"kind": "product_create", "draft_id": saved["id"], "draft_revision": 1})
+
+    def test_feed_other_performance_schema_registration_and_creation_card(self):
+        self.source.items["feeds"] = []
+        self.source.feed_readback = {"BusinessType": "OTHER", "FilterSchema": "PerformanceDefault",
+                                     "Status": "DONE", "NumberOfItems": 1}
+        row = self.propose({"kind": "product_feed_register", "feed_url": URL})
+        result = self.approve_fake(row)
+        self.assertEqual(result["state"], "applied", result["result"])
+        self.assertEqual(self.products.ready_feed(URL)["Id"], result["result"]["feed_id"])
+        saved = self.products.save_draft(draft())
+        self.propose({"kind": "product_create", "draft_id": saved["id"], "draft_revision": 1})
+        self.assertEqual(len(self.source.writes), 1)
+        self.assertEqual(self.source.items["campaigns"], [])
+
+    def test_ready_feed_rejects_wrong_identity_schema_and_incomplete_processing(self):
+        valid = self.source.items["feeds"][0] | {"BusinessType": "OTHER", "FilterSchema": "PerformanceDefault"}
+        for change in ({"BusinessType": "HOTELS"}, {"FilterSchema": "SiteSchema"}, {"FilterSchema": None},
+                       {"SourceType": "FILE"}, {"UrlFeed": {"Url": URL + "?other=1"}}, {"UrlFeed": None},
+                       {"Status": "NEW"}, {"Status": "ERROR"}, {"NumberOfItems": None},
+                       {"NumberOfItems": 0}, {"NumberOfItems": True}, {"NumberOfItems": "1"}):
+            with self.subTest(change=change):
+                self.source.items["feeds"] = [valid | change]
+                with self.assertRaises(Conflict):
+                    self.products.ready_feed(URL)
+
+    def test_other_pending_feed_is_registered_but_not_ready(self):
+        self.source.items["feeds"] = []
+        self.source.feed_readback = {"BusinessType": "OTHER", "NumberOfItems": None}
+        row = self.propose({"kind": "product_feed_register", "feed_url": URL})
+        result = self.approve_fake(row)
+        self.assertEqual(result["state"], "applied")
+        self.assertEqual(result["result"]["processing_status"], "NEW")
+        with self.assertRaises(Conflict):
+            self.products.ready_feed(URL)
+        self.assertEqual(len(self.source.writes), 1)
+
+    def uncertain_registered_feed(self):
+        self.source.items["feeds"] = []
+        self.source.feed_readback = {"BusinessType": "OTHER", "FilterSchema": "PerformanceDefault",
+                                     "Status": "DONE", "NumberOfItems": 1}
+        row = self.propose({"kind": "product_feed_register", "feed_url": URL})
+        # Reproduce the deployed legacy RETAIL-only readback failure after a successful add.
+        with patch("marketer.products.native_feed_matches", return_value=False):
+            result = self.approve_fake(row)
+        self.assertEqual(result["state"], "uncertain")
+        return row
+
+    def test_reconcile_confirmed_feed_is_read_only_and_preserves_duplicate_guard(self):
+        row = self.uncertain_registered_feed()
+        result = self.products.reconcile_feed_registration(row["id"])
+        self.assertEqual(result["state"], "applied")
+        self.assertTrue(result["result"]["reconciled"])
+        self.assertFalse(result["result"]["campaign_created"])
+        self.assertEqual(len(self.source.writes), 1)
+        with self.assertRaises(Conflict):
+            self.products.reconcile_feed_registration(row["id"])
+        with self.assertRaises(Conflict):
+            self.propose({"kind": "product_feed_register", "feed_url": URL})
+        with self.store.db() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM events WHERE proposal_id=? AND event='approve'",
+                                        (row["id"],)).fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT count(*) FROM events WHERE proposal_id=? AND event='feed_registration_reconciled'",
+                                        (row["id"],)).fetchone()[0], 1)
+
+    def test_reconcile_feed_requires_approval_and_exact_confirmed_id(self):
+        row = self.uncertain_registered_feed()
+        original = copy.deepcopy(self.source.items["feeds"][0])
+        for change in ({"Id": 999}, {"UrlFeed": {"Url": URL + "?other=1"}}, {"Status": "ERROR"}, {"FilterSchema": "SiteSchema"}):
+            with self.subTest(change=change):
+                self.source.items["feeds"] = [original | change]
+                with self.assertRaises(Conflict):
+                    self.products.reconcile_feed_registration(row["id"])
+                self.assertEqual(self.store.get(row["id"])["state"], "uncertain")
+        self.source.items["feeds"] = [original]
+        with self.store.db() as db:
+            db.execute("DELETE FROM events WHERE proposal_id=? AND event='approve'", (row["id"],))
+        with self.assertRaises(Conflict):
+            self.products.reconcile_feed_registration(row["id"])
+        self.assertEqual(self.store.get(row["id"])["state"], "uncertain")
+        self.assertEqual(len(self.source.writes), 1)
+
+    def test_reconcile_feed_rejects_unconfirmed_write(self):
+        self.source.items["feeds"] = []
+        row = self.propose({"kind": "product_feed_register", "feed_url": URL})
+        self.source.fail = ("feeds", "add")
+        self.approve_fake(row)
+        with self.assertRaises(Conflict):
+            self.products.reconcile_feed_registration(row["id"])
+        self.assertEqual(len(self.source.writes), 1)
 
     def test_revised_draft_invalidates_previous_card(self):
         saved = self.products.save_draft(draft())

@@ -34,6 +34,22 @@ def exact(value, required, optional=()):
         raise ValueError("Unexpected or missing fields; required: " + ", ".join(sorted(required)))
 
 
+def native_feed_matches(feed, url, allow_pending=False):
+    if feed.get("SourceType") != "URL" or (feed.get("UrlFeed") or {}).get("Url") != url:
+        return False
+    # Production can return OTHER for a RETAIL add; accept only its known YML schema.
+    compatible_schema = feed.get("FilterSchema") == "PerformanceDefault"
+    pending_schema = allow_pending and feed.get("Status") in ("NEW", "UPDATING") and not feed.get("FilterSchema")
+    return feed.get("BusinessType") == "RETAIL" or (
+        feed.get("BusinessType") == "OTHER" and (compatible_schema or pending_schema)
+    )
+
+
+def feed_processed(feed):
+    count = feed.get("NumberOfItems")
+    return feed.get("Status") == "DONE" and type(count) is int and count > 0
+
+
 def purchase_strategy(campaign):
     unified = campaign.get("UnifiedCampaign", {})
     if campaign.get("Type") != "UNIFIED_CAMPAIGN" or unified.get("PackageBiddingStrategy"):
@@ -190,11 +206,47 @@ class Products:
         return self.source.entities("feeds", "Feeds", {"FieldNames": ["Id", "Name", "Status", "SourceType", "BusinessType", "NumberOfItems", "FilterSchema"], "UrlFeedFieldNames": ["Url"]})
 
     def ready_feed(self, url):
-        feeds = [f for f in self.feeds() if f.get("SourceType") == "URL" and f.get("BusinessType") == "RETAIL" and f.get("UrlFeed", {}).get("Url") == url]
-        ready = [f for f in feeds if f.get("Status") == "DONE" and f.get("NumberOfItems", 0) > 0]
+        ready = [f for f in self.feeds() if native_feed_matches(f, url) and feed_processed(f)]
         if not ready:
             raise Conflict("Сначала зарегистрируйте этот URL отдельной карточкой фида и дождитесь успешной обработки Директом.")
         return sorted(ready, key=lambda f: f["Id"])[0]
+
+    def reconcile_feed_registration(self, proposal_id):
+        """Reconcile a confirmed feed ID with reads only; never replay a write."""
+        row = self.store.get(proposal_id)
+        action = row["body"]["action"]
+        if action.get("kind") != "product_feed_register" or row["state"] != "uncertain":
+            raise Conflict("Only an uncertain feed registration can be reconciled")
+        operation = self.operation(proposal_id)
+        steps = operation.get("steps", [])
+        if operation.get("target") != "production" or len(steps) != 1:
+            raise Conflict("A single confirmed production feed write is required")
+        step = steps[0]
+        ids = step.get("ids", [])
+        if (step.get("service"), step.get("method"), step.get("status")) != ("feeds", "add", "confirmed") or len(ids) != 1:
+            raise Conflict("Feed creation result is not confirmed; do not retry")
+        feed_id = positive(ids[0], "feed ID")
+        claim_key = "product_feed_claim:" + digest(action["feed_url"])
+        claim = self.store.setting(claim_key, {})
+        if claim.get("operation") != proposal_id:
+            raise Conflict("Feed operation claim does not match")
+        matches = [f for f in self.feeds() if f.get("Id") == feed_id]
+        if len(matches) != 1 or not native_feed_matches(matches[0], action["feed_url"]) or not feed_processed(matches[0]):
+            raise Conflict("Confirmed feed ID is not a matching, successfully processed URL feed")
+        result = {"feed_id": feed_id, "processing_status": matches[0]["Status"],
+                  "campaign_created": False, "reconciled": True, "observed_feed": matches[0]}
+        with self.store.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = self.store.unpack(db.execute("SELECT * FROM proposals WHERE id=?", (proposal_id,)).fetchone())
+            approved = db.execute("SELECT 1 FROM events WHERE proposal_id=? AND revision=? AND event='approve'",
+                                  (proposal_id, row["revision"])).fetchone()
+            if current["state"] != "uncertain" or current["revision"] != row["revision"] or current["body"] != row["body"] or not approved:
+                raise Conflict("An unchanged, previously owner-approved operation is required")
+            now = time.time()
+            db.execute("UPDATE proposals SET state='applied',result=?,updated=?,applied_at=? WHERE id=?",
+                       (encode(result), now, now, proposal_id))
+            self.store.event(db, current, "feed_registration_reconciled", "reconciler", result)
+        return self.store.get(proposal_id)
 
     def operation(self, proposal_id):
         return self.store.setting("product_operation:" + proposal_id, {"status": "not_attempted"})
@@ -408,7 +460,7 @@ class Products:
             self.claim("product_feed_claim:" + digest(action["feed_url"]), row["id"])
             feed_id = write("feed", "feeds", "add", {"Feeds": [{"Name": "ArtFarfor native inventory", "BusinessType": "RETAIL", "SourceType": "URL", "UrlFeed": {"Url": action["feed_url"], "RemoveUtmTags": "YES"}}]})[0]
             observed = next((f for f in self.feeds() if f["Id"] == feed_id), {})
-            if observed.get("UrlFeed", {}).get("Url") != action["feed_url"] or observed.get("BusinessType") != "RETAIL" or observed.get("SourceType") != "URL":
+            if not native_feed_matches(observed, action["feed_url"], allow_pending=True):
                 raise RuntimeError("Feed registration readback mismatch; do not retry")
             result = {"feed_id": feed_id, "processing_status": observed.get("Status"), "campaign_created": False}
         elif kind == "product_create":
