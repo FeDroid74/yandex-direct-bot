@@ -265,7 +265,7 @@ class DataSource:
                     c[period] = totals(aggregate, observed_goals)
                     c[period]["source"] = "direct_period_report"
                 c["groups"] = self.entities("adgroups", "AdGroups", {"SelectionCriteria": {"CampaignIds": [cid]}, "FieldNames": ["Id", "Name", "CampaignId", "NegativeKeywords", "Status", "ServingStatus"]})
-                c["ads"] = self.entities("ads", "Ads", {"SelectionCriteria": {"CampaignIds": [cid]}, "FieldNames": ["Id", "AdGroupId", "CampaignId", "State", "Status", "Type"], "TextAdFieldNames": ["Title", "Title2", "Text", "Href", "AdImageHash"]})
+                c["ads"] = self.entities("ads", "Ads", {"SelectionCriteria": {"CampaignIds": [cid]}, "FieldNames": ["Id", "AdGroupId", "CampaignId", "State", "Status", "Type"], "TextAdFieldNames": ["Title", "Title2", "Text", "Href", "AdImageHash"], "ShoppingAdFieldNames": ["FeedId", "DefaultTexts", "FeedFilterConditions"]})
                 c["queries"] = self.report(cid, split.isoformat(), end.isoformat(), "SEARCH_QUERY_PERFORMANCE_REPORT", ["CampaignId", "AdGroupId", "Query"], goal_id, attribution, goals) if c["placement"] != "network_only" else []
                 c["ad_performance"] = self.report(cid, split.isoformat(), end.isoformat(), "AD_PERFORMANCE_REPORT", ["AdId", "AdGroupId", "CampaignId", "AdNetworkType"], goal_id, attribution, goals)
                 c["placements"] = self.report(cid, split.isoformat(), end.isoformat(), "CUSTOM_REPORT", ["CampaignId", "AdNetworkType", "Placement"], goal_id, attribution, goals) if c["placement"] != "search_only" else []

@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from marketer.data import sufficient, totals
 from marketer.store import digest
 from marketer.schedule import weekly_slot
+from marketer.products import replacement_candidates
 
 
 AREAS = {"economics", "search", "rsya", "creative", "landing", "assortment", "experiment", "measurement"}
@@ -75,7 +76,9 @@ class Runner:
                     "campaign_id": r["body"]["campaign_id"], "action": r["body"]["action"]} for r in self.store.list(40)]
         compact["model_input_sampled"] = True
         for _ in range(5):
-            result = {"snapshot": compact, "history": history}
+            result = {"snapshot": compact, "history": history,
+                      "product_replacement_review": replacement_candidates(snapshot),
+                      "product_catalog": self.store.setting("product_catalog_last")}
             if len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()) <= 80000:
                 return result
             for c in compact["campaigns"]:
@@ -141,6 +144,10 @@ class Runner:
         for row in self.store.list(500):
             if row["state"] != "applied" or row["evaluated_at"] or row["result"].get("already_present"):
                 continue
+            if row["body"]["evidence"].get("product_workflow") and row["body"]["action"]["kind"] != "product_launch":
+                self.store.evaluate(row["id"], {"operational_only": True, "result": row["result"],
+                                               "conclusion": "Настройка не является оценкой продаж; пилот оценивается после запуска."})
+                continue
             due = row["applied_at"] + (row["body"]["evaluate_after_days"]+self.policy["conversion_lag_days"])*86400
             if time.time() < due:
                 continue
@@ -148,6 +155,20 @@ class Runner:
             report_timezone = ZoneInfo(self.policy.get("report_timezone", "Europe/Moscow"))
             start = datetime.fromtimestamp(row["applied_at"], report_timezone).date() + timedelta(days=1)
             end = datetime.now(report_timezone).date() - timedelta(days=self.policy["conversion_lag_days"]+1)
+            if e.get("product_workflow"):
+                cid = row["body"]["campaign_id"]
+                campaign = self.source.campaign(cid)
+                attribution = campaign.get("UnifiedCampaign", {}).get("AttributionModel", "AUTO")
+                rows = self.source.report(cid, start.isoformat(), end.isoformat(), "CAMPAIGN_PERFORMANCE_REPORT",
+                                          ["CampaignId"], e["goal_id"], attribution, [e["goal_id"]])
+                after = totals(rows, [e["goal_id"]])
+                count = f"{after['Conversions']:g}" if after["ConversionsComplete"] else "неизвестно, часть данных недоступна"
+                data = {"after": after, "date_from": start.isoformat(), "date_to": end.isoformat(), "attribution": attribution,
+                        "conclusion": "Ecommerce-покупки не подтверждают оплату. Это наблюдение после запуска, не доказательство прироста относительно старой кампании."}
+                self.telegram.notify(f"Товарный пилот {cid}, оценка #{row['id']} ({start} — {end}).\n"
+                                     f"Клики: {after['Clicks']:g}; расход: {after['Cost']:g} руб.; покупки (целевые визиты Директа): {count}.\n" + data["conclusion"])
+                self.store.evaluate(row["id"], data)
+                continue
             rows = self.source.report(row["body"]["campaign_id"], start.isoformat(), end.isoformat(),
                                       "CAMPAIGN_PERFORMANCE_REPORT", ["CampaignId"], e["goal_id"], e["attribution"], e.get("strategy_goals"))
             after = totals(rows, e.get("strategy_goals", []))
@@ -178,6 +199,17 @@ class Runner:
             snapshot["run_id"] = run_id
             snapshot["schedule_slot"] = slot
             self.store.set_setting("latest_snapshot", snapshot)
+            catalog = self.store.setting("product_catalog_last")
+            if isinstance(catalog, dict) and catalog.get("url"):
+                try:
+                    inspected = self.actions.products.catalog(catalog["url"])
+                except Exception as exc:
+                    self.store.set_setting("product_catalog_last", {"url": catalog["url"], "status": "unavailable",
+                                                                   "checked_at": time.time(), "error": type(exc).__name__})
+                    self.notify_once("product_feed_unavailable", "Не удалось обновить данные товарного фида. Актуальность ассортимента не подтверждена; кампании автоматически не изменялись.")
+                else:
+                    if inspected["invalid_count"] or inspected["unavailable"]:
+                        self.notify_once("product_feed_invalid", "Товарная выгрузка требует проверки: в ней есть некорректные или отсутствующие товары. Проверьте настройки остатков и исключения товаров в InSales. Кампании автоматически не изменялись.")
             allowed, reason = sufficient(snapshot, self.store.setting("last_analyzed_snapshot"), self.policy)
             if slot in self.policy.get("required_review_slots", []) and sufficient(snapshot, None, self.policy)[0]:
                 allowed, reason = True, "owner_requested_calendar_review"

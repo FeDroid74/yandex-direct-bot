@@ -3,7 +3,7 @@ from typing import Dict, List, Tuple
 
 ALLOWED_SITE = "https://artfarfor.com"
 ALLOWED_LANGUAGE = "RU"
-ALLOWED_GOALS = {"leads", "sales"}
+ALLOWED_GOALS = {"sales"}
 
 # Unified campaign delivery channels supported by backend create/update flow.
 ALLOWED_PLACEMENTS = {"both", "search_only", "network_only"}
@@ -55,7 +55,7 @@ def validate_campaign(data: Dict) -> Tuple[bool, List[str]]:
 
     goal_type = data.get("goal_type")
     if goal_type and goal_type not in ALLOWED_GOALS:
-        errors.append("goal_type must be 'leads' or 'sales'")
+        errors.append("goal_type must be 'sales' (purchase)")
 
     strategy_type = data.get("strategy_type")
     if strategy_type and strategy_type not in ALLOWED_STRATEGIES:
@@ -98,6 +98,8 @@ def validate_campaign(data: Dict) -> Tuple[bool, List[str]]:
             )
 
     metrica_goal_id = data.get("metrica_goal_id")
+    if str(metrica_goal_id).strip() != "352606262":
+        errors.append("metrica_goal_id must be purchase goal 352606262")
     if metrica_goal_id is not None:
         if not isinstance(metrica_goal_id, (int, str)):
             errors.append("metrica_goal_id must be string or number")

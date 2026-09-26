@@ -5,6 +5,7 @@ import time
 
 from marketer.data import checked, number
 from marketer.store import Conflict
+from marketer.products import KINDS, Products
 from marketer.telegram import card
 
 
@@ -36,8 +37,13 @@ class Actions:
     def __init__(self, source, store, policy):
         self.source, self.store, self.policy = source, store, policy
         self.lock = threading.Lock()
+        self.products = Products(source, store) if store is not None else None
 
     def prepare(self, raw, snapshot):
+        if isinstance(raw, dict) and isinstance(raw.get("action"), dict) and raw["action"].get("kind") in KINDS:
+            return self.products.prepare(raw, snapshot)
+        if not snapshot:
+            raise Conflict("Сначала нужен снимок аналитики.")
         if time.time() - snapshot.get("created", 0) > 7 * 86400:
             raise ValueError("Snapshot is too old; collect current data first")
         if not isinstance(raw, dict) or not isinstance(raw.get("action"), dict):
@@ -133,6 +139,8 @@ class Actions:
         body = row["body"]
         action, before, cid = body["action"], body["before"], body["campaign_id"]
         kind = action["kind"]
+        if kind in KINDS:
+            return self.products.execute(row)
         direct = self.source.direct
         # Fetch fresh state, merge only the approved field, then re-read to verify.
         if kind == "add_negative":

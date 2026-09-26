@@ -49,6 +49,8 @@ def header(row):
 
 
 def action_text(body):
+    if body.get("product_details"):
+        return body["product_details"]
     a = body["action"]
     if a["kind"] == "add_negative":
         return f"Добавить минус-фразу: {a['phrase']}\nТолько в группу {a['ad_group_id']}"
@@ -60,6 +62,8 @@ def action_text(body):
 
 
 def facts(body):
+    if body["evidence"].get("product_workflow"):
+        return "Настройки проверены через API. Прогноз продаж не является подтверждённым результатом."
     e, stats = body["evidence"], body["evidence"]["current"]
     goals = e.get("goals", {})
     main = goals.get(str(e["goal_id"]), {})
@@ -100,13 +104,17 @@ def goal_details(goals):
 
 def explanation(body):
     effect = re.sub(r"^(?:гипотеза\s*:\s*)+", "", body["expected_effect"].strip(), flags=re.IGNORECASE)
-    criterion = "Критерий выполнения" if body["action"]["kind"] == "advisory" else f"Оценка через {body['evaluate_after_days']} дней"
+    criterion = "Критерий выполнения" if body["action"]["kind"] == "advisory" or body["evidence"].get("product_workflow") else f"Оценка через {body['evaluate_after_days']} дней"
     return [("Почему", body["reason"], 400), ("Гипотеза", effect, 240), (criterion, body["success_metric"], 420)]
 
 
 def card(row):
     b = row["body"]
     required = [header(row), b["title"], f"{b['campaign_name']} ({b['campaign_id']})", action_text(b), facts(b), "\n".join(b["warnings"])]
+    if b["evidence"].get("product_workflow") and row["state"] == "applied":
+        result = row.get("result") or {}
+        required.append("Результат: " + "; ".join(
+            f"{label}: {result[key]}" for key, label in (("campaign_id", "кампания"), ("feed_id", "фид"), ("state", "состояние"), ("processing_status", "обработка фида")) if key in result))
     optional = [f"{label}: {summary(value, maximum)}" for label, value, maximum in explanation(b)]
     if (row.get("result") or {}).get("error"):
         optional.append("Результат: " + summary(row["result"]["error"], 400))
@@ -129,6 +137,13 @@ def detail_pages(row):
         parts.append("Цели раздельно (их нельзя складывать):\n" + goal_details(b["evidence"]["goals"]))
     if b["evidence"].get("limits"):
         parts.append("Ограничения:\n" + "\n".join(b["evidence"]["limits"]))
+    if b.get("product_plan"):
+        plan = b["product_plan"]
+        parts.append("Источник товаров: " + plan["feed_url"])
+        parts.append("Группы и отбор товаров:\n" + "\n\n".join(
+            f"{g['name']}: {g['product_count']} товаров\nКатегории: {', '.join(g['category_ids'])}\n"
+            f"Товары: {', '.join(g['offer_ids']) if g['offer_ids'] else 'все доступные в выбранных категориях'}\nТекст: {g['default_text']}"
+            for g in plan["groups"]))
     if b.get("before"):
         parts.append("Исходные параметры:\n" + json.dumps(b["before"], ensure_ascii=False, indent=2))
     if (row.get("result") or {}).get("error"):

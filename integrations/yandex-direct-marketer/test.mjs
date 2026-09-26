@@ -43,7 +43,7 @@ try {
   assert.equal(lastBody.decision, "approve");
   assert.equal(lastBody.page, undefined);
   assert.equal(calls, 3);
-  assert.equal(registered.length, 5);
+  assert.equal(registered.length, 13);
   assert.ok(registered.every((tool) => !/approve|execute|apply/.test(tool.name)));
   console.log("Plugin tests passed: owner validation, paged details, native Telegram buttons, no approval tool exposed.");
 } finally {

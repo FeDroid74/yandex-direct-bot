@@ -7,9 +7,9 @@
 - region
 - language = RU
 - placement_type (search_only / network_only / both)
-- goal_type (leads / sales)
+- goal_type (sales only; Ecommerce purchase)
 - strategy_type = pay_for_conversion
-- metrica_goal_id
+- metrica_goal_id (352606262 only; no cart/lead/click substitution)
 - weekly_budget_rub
 - target_cpa_rub
 

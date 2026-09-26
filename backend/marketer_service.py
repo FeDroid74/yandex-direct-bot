@@ -9,6 +9,7 @@ from pathlib import Path
 from marketer.actions import Actions
 from marketer.data import DataSource
 from marketer.runner import Runner
+from marketer.products import replacement_candidates
 from marketer.store import Conflict, Store
 from marketer.telegram import Telegram, card, detail_response
 
@@ -76,10 +77,22 @@ def serve():
                     result = runner.context(store.setting("latest_snapshot"))
                 elif self.path == "/proposal":
                     result = store.get(params["id"])
+                elif self.path == "/products/catalog":
+                    result = actions.products.catalog(params["feed_url"])
+                elif self.path == "/products/feeds":
+                    result = {"feeds": actions.products.feeds()}
+                elif self.path == "/products/draft":
+                    result = actions.products.save_draft(params["draft"], params.get("id"), params.get("revision"))
+                elif self.path == "/products/get_draft":
+                    result = actions.products.get_draft(params["id"])
+                elif self.path == "/products/inspect":
+                    result = actions.products.inspect(params["campaign_id"])
+                elif self.path == "/products/candidates":
+                    result = replacement_candidates(store.setting("latest_snapshot"))
+                elif self.path == "/products/operation":
+                    result = actions.products.operation(params["id"])
                 elif self.path in ("/propose", "/revise"):
                     snapshot = store.setting("latest_snapshot")
-                    if not snapshot:
-                        raise Conflict("Сначала нужен снимок аналитики.")
                     body = actions.prepare(params["proposal"], snapshot)
                     if self.path == "/revise":
                         result = store.revise(params["id"], params["revision"], body)

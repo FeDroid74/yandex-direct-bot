@@ -139,6 +139,8 @@ class YandexDirectClient:
         placement_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         normalized_placement = self.normalize_placement_type(placement_type)
+        if type(goal_id) is not int or goal_id != 352606262:
+            raise YandexDirectClientError("ArtFarfor campaigns require purchase goal 352606262; cart/click/lead billing is forbidden")
         pay_for_conversion = {
             "GoalId": goal_id,
             "Cpa": cpa_micros,

@@ -48,8 +48,16 @@ export default function (api: any) {
     ["marketer_status", "/status", "Read autonomous analysis status and independent proposal states.", {}],
     ["marketer_context", "/context", "Read collected Direct/Metrika facts and proposal history, including run id. No live writes.", {}],
     ["marketer_proposal", "/proposal", "Read one proposal, exact action, evidence and version.", { id: { type: "string" } }],
-    ["marketer_propose", "/propose", "Create ONE independently approvable card; never applies changes. Supported actions: add_negative, ad_text, strategy_value, advisory. Use current collected context and explicit facts.", { proposal: { type: "object", additionalProperties: true } }],
+    ["marketer_propose", "/propose", "Create ONE independently approvable card; never applies changes. Actions: add_negative, ad_text, strategy_value, advisory; product_feed_register, product_create, product_edit, product_ad_edit, product_moderate, product_launch, product_pause_old. Read docs/PRODUCT_CAMPAIGNS.md for strict schemas. No approval tool.", { proposal: { type: "object", additionalProperties: true } }],
     ["marketer_revise", "/revise", "Edit only the requested pending card. Creates a new version requiring fresh owner approval. Does not change other cards.", { id: { type: "string" }, revision: { type: "integer" }, proposal: { type: "object", additionalProperties: true } }],
+    ["product_catalog", "/products/catalog", "Read and validate the owner's native auto-updating InSales YML URL. No Direct writes. Inventory is not proof of paid sales.", { feed_url: { type: "string" } }],
+    ["product_feeds", "/products/feeds", "Read Direct feed processing statuses. Never register a duplicate feed.", {}],
+    ["product_draft", "/products/draft", "Create a local product campaign draft, not a live campaign. Strict schema in docs/PRODUCT_CAMPAIGNS.md. Requires explicit purchase CPA, weekly budget, regions, category IDs and native feed URL.", { draft: { type: "object", additionalProperties: true } }],
+    ["product_draft_revise", "/products/draft", "Revise one local product draft by id and revision. Old creation cards become stale. No live writes.", { id: { type: "string" }, revision: { type: "integer" }, draft: { type: "object", additionalProperties: true } }],
+    ["product_get_draft", "/products/get_draft", "Read one product draft and its current revision.", { id: { type: "string" } }],
+    ["product_inspect", "/products/inspect", "Read product campaign, ads, managed state and purchase billing check.", { campaign_id: { type: "integer" } }],
+    ["product_candidates", "/products/candidates", "Read evidence-based replacement candidates. Unknown conversions are not zero. Preserve working campaigns; no automatic pause.", {}],
+    ["product_operation", "/products/operation", "Read per-step operation journal for a proposal, including partial/uncertain results. Never retry uncertain writes.", { id: { type: "string" } }],
   ] as const;
 
   for (const [name, path, description, properties] of definitions) {

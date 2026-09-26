@@ -278,6 +278,7 @@ class MultiGoalTests(unittest.TestCase):
         original = copy.deepcopy(data)
         store = Mock()
         store.list.return_value = []
+        store.setting.return_value = None
         context = Runner(store, Mock(), Mock(), Mock(), POLICY).context(data)
         self.assertNotIn("daily", context["snapshot"]["campaigns"][0])
         self.assertNotIn("period_reports", context["snapshot"]["campaigns"][0])
