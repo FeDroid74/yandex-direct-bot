@@ -13,7 +13,7 @@ from marketer.store import Conflict, digest, encode
 
 PURCHASE_GOAL = 352606262
 COUNTER_ID = 99041859
-KINDS = {"product_feed_register", "product_create", "product_edit", "product_ad_edit", "product_moderate", "product_launch", "product_pause_old"}
+KINDS = {"product_feed_register", "product_create", "product_complete_create", "product_edit", "product_ad_edit", "product_moderate", "product_launch", "product_pause_old"}
 SHOPPING_FIELDS = ["FeedId", "DefaultTexts", "FeedFilterConditions", "TitleSources", "TextSources"]
 
 
@@ -48,6 +48,10 @@ def native_feed_matches(feed, url, allow_pending=False):
 def feed_processed(feed):
     count = feed.get("NumberOfItems")
     return feed.get("Status") == "DONE" and type(count) is int and count > 0
+
+
+def inactive_draft(campaign):
+    return campaign.get("Status") == "DRAFT" and campaign.get("State") in ("OFF", "SUSPENDED")
 
 
 def purchase_strategy(campaign):
@@ -260,7 +264,137 @@ class Products:
     def ads(self, cid):
         return sorted(self.source.entities("ads", "Ads", {"SelectionCriteria": {"CampaignIds": [cid]},
                                     "FieldNames": ["Id", "CampaignId", "AdGroupId", "Type", "State", "Status"],
-                                    "ShoppingAdFieldNames": SHOPPING_FIELDS}), key=lambda ad: ad["Id"])
+                                    "ShoppingAdFieldNames": SHOPPING_FIELDS}, allow_empty_result=True), key=lambda ad: ad["Id"])
+
+    def empty_creation(self, cid, source_proposal_id):
+        original = self.store.get(source_proposal_id)
+        if original["state"] not in ("uncertain", "partial") or original["body"]["action"].get("kind") != "product_create":
+            raise Conflict("Continuation requires an inspected partial product creation")
+        operation = self.operation(source_proposal_id)
+        steps = operation.get("steps", [])
+        if operation.get("target") != "production" or len(steps) != 2:
+            raise Conflict("Only the known empty-draft suspension failure can be continued")
+        added, suspended = steps
+        errors = suspended.get("result", {}).get("SuspendResults", [])
+        if ((added.get("service"), added.get("method"), added.get("status"), added.get("ids")) != ("campaigns", "add", "confirmed", [cid]) or
+                (suspended.get("service"), suspended.get("method"), suspended.get("status")) != ("campaigns", "suspend", "rejected_or_partial") or
+                len(errors) != 1 or errors[0].get("Id") or [e.get("Code") for e in errors[0].get("Errors", [])] != [8300]):
+            raise Conflict("The journal does not prove an empty draft with a rejected suspension")
+        draft_id = original["body"]["action"]["draft_id"]
+        draft = self.get_draft(draft_id)
+        if draft["revision"] != original["body"]["action"]["draft_revision"] or draft["plan"] != original["body"]["product_plan"]:
+            raise Conflict("Original draft changed; continuation needs a new reviewed plan")
+        claim = self.store.setting("product_draft_claim:" + draft_id, {})
+        deployed = self.store.setting("product_deployed:" + draft_id, {})
+        if claim.get("operation") != source_proposal_id or deployed != {"campaign_id": cid, "operation": source_proposal_id}:
+            raise Conflict("Campaign does not match the recorded creation and draft claim")
+        with self.store.db() as db:
+            approved = db.execute("SELECT 1 FROM events WHERE proposal_id=? AND revision=? AND event='approve'",
+                                  (source_proposal_id, original["revision"])).fetchone()
+        if not approved or self.store.setting("product_completion_claim:" + str(cid)):
+            raise Conflict("Original approval is absent or continuation was already attempted")
+        live = self.inspect(cid)
+        managed = live["managed"]
+        if (not managed or managed.get("operation") != source_proposal_id or managed.get("complete") or managed.get("groups") or
+                managed.get("plan") != original["body"].get("product_plan") or
+                managed.get("feed_id") != original["body"]["before"].get("feed_id")):
+            raise Conflict("Managed campaign is not the original empty partial draft")
+        groups = self.source.entities("adgroups", "AdGroups", {"SelectionCriteria": {"CampaignIds": [cid]}, "FieldNames": ["Id"]}, allow_empty_result=True)
+        if not inactive_draft(live["campaign"]) or groups or live["ads"]:
+            raise Conflict("Campaign must still be an inactive draft without any groups or ads")
+        plan = managed["plan"]
+        purchase_strategy(live["campaign"])
+        strategy = self.source.direct.build_unified_bidding_strategy(goal_id=PURCHASE_GOAL,
+            cpa_micros=int(money(plan["target_cpa_rub"], "CPA") * 1000000),
+            weekly_budget_micros=int(money(plan["weekly_budget_rub"], "budget") * 1000000), placement_type=plan["placement_type"])
+        self.verify_strategy(live["campaign"], strategy)
+        if live["campaign"]["Name"] != plan["name"]:
+            raise Conflict("Campaign name changed outside the approved plan")
+        return live
+
+    def reconcile_creation(self, proposal_id):
+        """Verify all recorded objects after a readback failure, without Direct writes."""
+        row = self.store.get(proposal_id)
+        action = row["body"]["action"]
+        if row["state"] != "uncertain" or action.get("kind") not in ("product_create", "product_complete_create"):
+            raise Conflict("Only an uncertain product creation can be reconciled")
+        continued = action["kind"] == "product_complete_create"
+        deployed = self.store.setting("product_deployed:" + action.get("draft_id", ""), {})
+        cid = action.get("campaign_id") if continued else deployed.get("campaign_id")
+        positive(cid, "campaign ID")
+        claim_key = "product_completion_claim:" + str(cid) if continued else "product_draft_claim:" + action["draft_id"]
+        if self.store.setting(claim_key, {}).get("operation") != proposal_id:
+            raise Conflict("Creation claim does not match the inspected operation")
+        live = self.inspect(cid)
+        managed = live["managed"]
+        plan = row["body"]["product_plan"]
+        if (not managed or managed.get("complete") or managed.get("plan") != plan or
+                managed.get("completion_operation" if continued else "operation") != proposal_id or
+                managed.get("feed_id") != row["body"]["before"]["feed_id"]):
+            raise Conflict("Managed objects do not match the approved creation")
+        entries = managed["groups"]
+        if len(entries) != len(plan["groups"]) or [g["index"] for g in entries] != list(range(len(entries))):
+            raise Conflict("Not all planned groups have confirmed IDs")
+        journal = self.operation(proposal_id)
+        steps = journal.get("steps", [])
+        expected = [] if continued else [("campaigns", ("add",), [cid])]
+        for g in entries:
+            expected += [("adgroups", ("add",), [g["group_id"]]), ("ads", ("add",), [g["ad_id"]]),
+                         ("keywords", ("add", "update"), [g.get("autotargeting_id")]),
+                         ("keywords", ("resume",), [g.get("autotargeting_id")])]
+        if journal.get("target") != "production" or len(steps) != len(expected) or any(
+            step.get("status") != "confirmed" or step.get("service") != service or step.get("method") not in methods or
+            step.get("ids") != ids or any(type(i) is not int or i <= 0 for i in ids)
+            for step, (service, methods, ids) in zip(steps, expected)
+        ):
+            raise Conflict("Creation journal contains missing, unconfirmed or unexpected writes")
+        campaign, ads = live["campaign"], live["ads"]
+        purchase_strategy(campaign)
+        strategy = self.source.direct.build_unified_bidding_strategy(goal_id=PURCHASE_GOAL,
+            cpa_micros=int(money(plan["target_cpa_rub"], "CPA") * 1000000),
+            weekly_budget_micros=int(money(plan["weekly_budget_rub"], "budget") * 1000000), placement_type=plan["placement_type"])
+        self.verify_strategy(campaign, strategy)
+        if not inactive_draft(campaign) or campaign["Name"] != plan["name"]:
+            raise Conflict("Campaign must match the approved inactive draft")
+        if self.ready_feed(plan["feed_url"])["Id"] != managed["feed_id"]:
+            raise Conflict("Feed readback mismatch")
+        groups = self.source.entities("adgroups", "AdGroups", {"SelectionCriteria": {"CampaignIds": [cid]},
+            "FieldNames": ["Id", "CampaignId", "Name", "RegionIds"], "UnifiedAdGroupFieldNames": ["OfferRetargeting"]})
+        if {g["Id"] for g in groups} != {g["group_id"] for g in entries} or {a["Id"] for a in ads} != {g["ad_id"] for g in entries}:
+            raise Conflict("Unexpected group or ad inventory; no reconciliation")
+        for entry in entries:
+            group_plan = plan["groups"][entry["index"]]
+            group = next(g for g in groups if g["Id"] == entry["group_id"])
+            ad = next(a for a in ads if a["Id"] == entry["ad_id"])
+            if (group.get("CampaignId") != cid or group["Name"] != group_plan["name"] or
+                    sorted(group["RegionIds"]) != sorted(plan["region_ids"]) or group.get("UnifiedAdGroup", {}).get("OfferRetargeting") != "NO" or
+                    ad.get("CampaignId") != cid or ad.get("AdGroupId") != group["Id"] or ad.get("Type") != "SHOPPING_AD" or
+                    ad.get("Status") != "DRAFT" or ad.get("State") not in ("OFF", "SUSPENDED")):
+                raise Conflict("Group/ad readback differs from the approved inactive plan")
+            self.verify_ad(ad, managed["feed_id"], group_plan)
+            targeting = checked(self.source.direct.get_autotargeting_keywords(group["Id"])).get("Keywords", [])
+            settings = {"Categories": {"Exact": "YES", "Narrow": "YES", "Alternative": "NO", "Accessory": "NO", "Broader": "NO"},
+                        "BrandOptions": {"WithAdvertiserBrand": "YES", "WithoutBrands": "YES", "WithCompetitorsBrand": "NO"}}
+            if len(targeting) != 1 or targeting[0].get("Id") != entry["autotargeting_id"] or targeting[0].get("State") != "ON" or targeting[0].get("AutotargetingSettings") != settings:
+                raise Conflict("Autotargeting readback differs from the approved plan")
+        result = {"campaign_id": cid, "feed_id": managed["feed_id"], "state": campaign["State"], "status": campaign["Status"],
+                  "moderated": False, "old_campaign_changed": False, "continued_existing": continued, "reconciled": True}
+        with self.store.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = self.store.unpack(db.execute("SELECT * FROM proposals WHERE id=?", (proposal_id,)).fetchone())
+            approved = db.execute("SELECT 1 FROM events WHERE proposal_id=? AND revision=? AND event='approve'",
+                                  (proposal_id, row["revision"])).fetchone()
+            stored = db.execute("SELECT value FROM settings WHERE key=?", ("product_campaign:" + str(cid),)).fetchone()
+            if current["state"] != "uncertain" or current["revision"] != row["revision"] or current["body"] != row["body"] or not approved or not stored or json.loads(stored[0]) != managed:
+                raise Conflict("Unchanged original owner approval and managed state required")
+            managed["complete"] = True
+            journal.update(complete=True, result=result, reconciled=True)
+            db.execute("UPDATE settings SET value=? WHERE key=?", (encode(managed), "product_campaign:" + str(cid)))
+            db.execute("UPDATE settings SET value=? WHERE key=?", (encode(journal), "product_operation:" + proposal_id))
+            now = time.time()
+            db.execute("UPDATE proposals SET state='applied',result=?,updated=?,applied_at=? WHERE id=?", (encode(result), now, now, proposal_id))
+            self.store.event(db, current, "product_creation_reconciled", "reconciler", result)
+        return self.store.get(proposal_id)
 
     def inspect(self, cid):
         positive(cid, "campaign_id")
@@ -297,31 +431,42 @@ class Products:
             before = {"catalog_digest": digest(catalog["offers"])}
             label, title = "ArtFarfor", "Зарегистрировать автообновляемый товарный фид"
             details = f"Источник: {action['feed_url']}\nТоваров сейчас: {catalog['available']}.\nЭто не создаёт кампанию и не запускает рекламу."
-        elif kind == "product_create":
-            exact(action, {"kind", "draft_id", "draft_revision"})
-            positive(action["draft_revision"], "draft_revision")
-            draft = self.get_draft(action["draft_id"])
-            if draft["revision"] != action["draft_revision"]:
-                raise Conflict("Product draft revision changed")
-            if self.store.setting("product_deployed:" + action["draft_id"]):
-                raise Conflict("This draft already has a created/partial campaign; inspect it instead of duplicating")
-            if self.store.setting("product_draft_claim:" + action["draft_id"]):
-                raise Conflict("Создание по этому черновику уже запускалось; сначала сверка журнала.")
-            plan = draft["plan"]
+        elif kind in ("product_create", "product_complete_create"):
+            if kind == "product_create":
+                exact(action, {"kind", "draft_id", "draft_revision"})
+                positive(action["draft_revision"], "draft_revision")
+                draft = self.get_draft(action["draft_id"])
+                if draft["revision"] != action["draft_revision"]:
+                    raise Conflict("Product draft revision changed")
+                if self.store.setting("product_deployed:" + action["draft_id"]):
+                    raise Conflict("This draft already has a created/partial campaign; inspect it instead of duplicating")
+                if self.store.setting("product_draft_claim:" + action["draft_id"]):
+                    raise Conflict("Создание по этому черновику уже запускалось; сначала сверка журнала.")
+                plan = draft["plan"]
+                cid = plan.get("replacement_for_campaign_id", 0)
+            else:
+                exact(action, {"kind", "campaign_id", "source_proposal_id"})
+                cid = positive(action["campaign_id"], "campaign_id")
+                live = self.empty_creation(cid, string(action["source_proposal_id"], "source_proposal_id", 12))
+                plan = live["managed"]["plan"]
+                before = {"campaign": live["campaign"], "ads": [], "groups": []}
             refreshed = self.validate(self.editable(plan), self.fetcher(plan["feed_url"]))
             if refreshed != plan:
                 raise Conflict("Catalog changed; update the draft and review it again")
             self.assert_goal()
-            before = {"feed_id": self.ready_feed(plan["feed_url"])["Id"]}
-            cid = plan.get("replacement_for_campaign_id", 0)
+            before["feed_id"] = self.ready_feed(plan["feed_url"])["Id"]
+            if kind == "product_complete_create" and before["feed_id"] != live["managed"]["feed_id"]:
+                raise Conflict("The original campaign feed is no longer the verified ready feed")
             label = plan["name"]
-            title = "Создать товарную кампанию без запуска"
+            title = "Создать товарную кампанию без запуска" if kind == "product_create" else "Достроить товарную кампанию без запуска"
             details = (f"{label}\nОплата только за покупку: цель {PURCHASE_GOAL}.\n"
                        f"CPA: {plan['target_cpa_rub']} руб.; недельный бюджет: {plan['weekly_budget_rub']} руб.\n"
                        f"Размещение: {plan['placement_type']}; регионы: {plan['region_ids']}.\n"
                        f"Групп: {len(plan['groups'])}; товаров сейчас: {sum(g['product_count'] for g in plan['groups'])}.\n"
                        "Автотаргетинг: целевые и узкие запросы; без конкурентов. Офферный ретаргетинг выключен.\n"
-                       "Создание не запускает показы и не останавливает старую кампанию.")
+                       "Кампания и объявления останутся черновиками без показов. Модерация и запуск не выполняются.")
+            if kind == "product_complete_create":
+                details += f"\nИспользуется существующая кампания {cid}. Новая кампания не создаётся."
         else:
             allowed = {"kind", "campaign_id"}
             if kind in ("product_edit", "product_ad_edit"):
@@ -379,6 +524,8 @@ class Products:
                 title = "Изменить товарное объявление" if kind == "product_ad_edit" else "Изменить параметр товарной кампании"
                 details = f"Только кампания {cid}" + (f", объявление {action['ad_id']}" if kind == "product_ad_edit" else "") + ":\n" + json.dumps(patch, ensure_ascii=False)
             elif kind == "product_moderate":
+                if inactive_draft(campaign) and campaign["State"] == "OFF":
+                    raise Conflict("Автомодерация черновика пока заблокирована: сначала нужно подтвердить способ удержать показы выключенными после модерации. Создание не разрешает запуск.")
                 if campaign["State"] != "SUSPENDED" or not ads or any(a["Status"] != "DRAFT" for a in ads):
                     raise Conflict("Moderation is separate: campaign must be suspended and all ads must be drafts")
                 title, details = "Отправить товарные объявления на модерацию", f"Объявления кампании {cid}. Кампания останется остановленной."
@@ -447,7 +594,9 @@ class Products:
             if len(items) != expected or any(i.get("Errors") or not i.get("Id") for i in items):
                 step.update(status="rejected_or_partial", result=result)
                 self.store.set_setting(journal_key, journal)
-                raise RuntimeError("Direct write failed/partial; inspect product operation " + row["id"])
+                errors = [e for item in items for e in item.get("Errors", [])]
+                reason = "; ".join(f"{e.get('Details') or e.get('Message') or 'Ошибка'} (код {e.get('Code', '?')})" for e in errors)
+                raise RuntimeError("Яндекс.Директ: " + (reason[:600] or "не подтвердил полный результат запроса") + ". Выполнение остановлено; нужна сверка уже созданных объектов.")
             if method != "add":
                 expected_ids = params.get("SelectionCriteria", {}).get("Ids") or [i["Id"] for i in next(iter(params.values()))]
                 if [i["Id"] for i in items] != expected_ids:
@@ -463,23 +612,29 @@ class Products:
             if not native_feed_matches(observed, action["feed_url"], allow_pending=True):
                 raise RuntimeError("Feed registration readback mismatch; do not retry")
             result = {"feed_id": feed_id, "processing_status": observed.get("Status"), "campaign_created": False}
-        elif kind == "product_create":
-            self.claim("product_draft_claim:" + action["draft_id"], row["id"])
+        elif kind in ("product_create", "product_complete_create"):
             feed_id = body["before"]["feed_id"]
             strategy = self.source.direct.build_unified_bidding_strategy(goal_id=PURCHASE_GOAL, cpa_micros=int(money(plan["target_cpa_rub"], "CPA") * 1000000), weekly_budget_micros=int(money(plan["weekly_budget_rub"], "budget") * 1000000), placement_type=plan["placement_type"])
-            campaign = {"Name": plan["name"], "StartDate": datetime.now(ZoneInfo("Europe/Moscow")).date().isoformat(),
-                        "TimeZone": "Europe/Moscow", "UnifiedCampaign": {"CounterIds": {"Items": [COUNTER_ID]}, "BiddingStrategy": strategy,
-                        "TrackingParams": "utm_source=yandex&utm_medium=cpc&utm_campaign={campaign_id}&utm_content={ad_id}&utm_term={keyword}"}}
-            created_id = write("campaign", "campaigns", "add", {"Campaigns": [campaign]})[0]
-            self.store.set_setting("product_deployed:" + action["draft_id"], {"campaign_id": created_id, "operation": row["id"]})
-            managed = {"campaign_id": created_id, "feed_id": feed_id, "plan": plan, "groups": [], "complete": False, "operation": row["id"]}
+            if kind == "product_create":
+                self.claim("product_draft_claim:" + action["draft_id"], row["id"])
+                campaign = {"Name": plan["name"], "StartDate": datetime.now(ZoneInfo("Europe/Moscow")).date().isoformat(),
+                            "TimeZone": "Europe/Moscow", "UnifiedCampaign": {"CounterIds": {"Items": [COUNTER_ID]}, "BiddingStrategy": strategy,
+                            "TrackingParams": "utm_source=yandex&utm_medium=cpc&utm_campaign={campaign_id}&utm_content={ad_id}&utm_term={keyword}"}}
+                created_id = write("campaign", "campaigns", "add", {"Campaigns": [campaign]})[0]
+                self.store.set_setting("product_deployed:" + action["draft_id"], {"campaign_id": created_id, "operation": row["id"]})
+                managed = {"campaign_id": created_id, "feed_id": feed_id, "plan": plan, "groups": [], "complete": False, "operation": row["id"]}
+            else:
+                self.claim("product_completion_claim:" + str(cid), row["id"])
+                created_id = cid
+                managed = self.store.setting("product_campaign:" + str(cid))
+                managed["completion_operation"] = row["id"]
             key = "product_campaign:" + str(created_id)
             self.store.set_setting(key, managed)
-            write("suspend new campaign", "campaigns", "suspend", {"SelectionCriteria": {"Ids": [created_id]}})
             observed = self.source.campaign(created_id)
             purchase_strategy(observed)
-            if observed["State"] != "SUSPENDED":
-                raise RuntimeError("New campaign suspension not verified; no ads created")
+            if not inactive_draft(observed):
+                raise RuntimeError("Кампания не является выключенным черновиком; объявления не создавались.")
+            self.verify_strategy(observed, strategy)
             for index, group in enumerate(plan["groups"]):
                 gid = write("group " + str(index), "adgroups", "add", {"AdGroups": [{"Name": group["name"], "CampaignId": created_id, "RegionIds": plan["region_ids"], "UnifiedAdGroup": {"OfferRetargeting": "NO"}}]})[0]
                 entry = {"index": index, "group_id": gid, "ad_id": None}
@@ -490,7 +645,7 @@ class Products:
                 self.store.set_setting(key, managed)
                 autotargets = checked(self.source.direct.get_autotargeting_keywords(gid)).get("Keywords", [])
                 if len(autotargets) > 1:
-                    raise RuntimeError("Unexpected multiple autotargetings; campaign stays suspended")
+                    raise RuntimeError("Unexpected multiple autotargetings; campaign is not sent for moderation")
                 settings = {"Categories": {"Exact": "YES", "Narrow": "YES", "Alternative": "NO", "Accessory": "NO", "Broader": "NO"},
                             "BrandOptions": {"WithAdvertiserBrand": "YES", "WithoutBrands": "YES", "WithCompetitorsBrand": "NO"}}
                 if autotargets:
@@ -503,22 +658,23 @@ class Products:
                 self.store.set_setting(key, managed)
                 targeting = checked(self.source.direct.get_autotargeting_keywords(gid)).get("Keywords", [])
                 if len(targeting) != 1 or targeting[0].get("Id") != tid or targeting[0].get("State") != "ON" or targeting[0].get("AutotargetingSettings") != settings:
-                    raise RuntimeError("Autotargeting readback mismatch; campaign stays suspended")
+                    raise RuntimeError("Autotargeting readback mismatch; campaign is not sent for moderation")
             actual = self.ads(created_id)
             for group in managed["groups"]:
                 ad = next((a for a in actual if a["Id"] == group["ad_id"]), {})
                 expected = plan["groups"][group["index"]]
                 self.verify_ad(ad, feed_id, expected)
                 if ad.get("Status") != "DRAFT":
-                    raise RuntimeError("New ad is not a draft; campaign remains suspended")
+                    raise RuntimeError("New ad is not a draft; campaign state requires inspection")
             observed = self.source.campaign(created_id)
             purchase_strategy(observed)
-            if observed["Name"] != plan["name"] or observed["State"] != "SUSPENDED":
+            if observed["Name"] != plan["name"] or not inactive_draft(observed):
                 raise RuntimeError("New campaign settings readback mismatch")
             self.verify_strategy(observed, strategy)
             managed["complete"] = True
             self.store.set_setting(key, managed)
-            result = {"campaign_id": created_id, "feed_id": feed_id, "state": "SUSPENDED", "moderated": False, "old_campaign_changed": False}
+            result = {"campaign_id": created_id, "feed_id": feed_id, "state": observed["State"], "status": observed["Status"],
+                      "moderated": False, "old_campaign_changed": False, "continued_existing": kind == "product_complete_create"}
         else:
             live = self.inspect(cid)
             managed = live["managed"]
@@ -590,7 +746,14 @@ class Products:
     @staticmethod
     def verify_ad(ad, feed_id, group):
         fields = ad.get("ShoppingAd", {})
-        filters = lambda values: sorted((f["Operand"], f["Operator"], tuple(sorted(f["Arguments"]))) for f in values)
+        def filters(values):
+            if isinstance(values, dict) and set(values) == {"Items"}:
+                values = values["Items"]
+            if not isinstance(values, list) or any(not isinstance(f, dict) or not isinstance(f.get("Operand"), str) or
+                    not isinstance(f.get("Operator"), str) or not isinstance(f.get("Arguments"), list) or
+                    any(not isinstance(a, str) for a in f["Arguments"]) for f in values):
+                raise RuntimeError("Некорректный формат фильтров в ответе Яндекс.Директа; требуется сверка.")
+            return sorted((f["Operand"], f["Operator"], tuple(sorted(f["Arguments"]))) for f in values)
         if (fields.get("FeedId") != feed_id or fields.get("DefaultTexts") != [group["default_text"]] or
                 filters(fields.get("FeedFilterConditions", [])) != filters(group["filters"])):
             raise RuntimeError("ShoppingAd readback mismatch")

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from marketer.actions import Actions
+from marketer.data import DataSource
 from marketer.catalog import parse_yml, select_offers, shop_url
 from marketer.products import COUNTER_ID, PURCHASE_GOAL, Products, purchase_strategy, replacement_candidates
 from marketer.runner import Runner
@@ -52,12 +53,18 @@ class FakeDirect:
         self.writes, self.next_id, self.fail = [], 100, None
         self.feed_readback = {}
 
-    def entities(self, service, key, params):
+    def entities(self, service, key, params, allow_empty_result=False):
         criteria = params.get("SelectionCriteria", {})
         values = self.items[service]
         if "CampaignIds" in criteria:
             values = [v for v in values if v["CampaignId"] in criteria["CampaignIds"]]
-        return copy.deepcopy(values)
+        values = copy.deepcopy(values)
+        if service == "ads":
+            for value in values:
+                fields = value.get("ShoppingAd", {})
+                if isinstance(fields.get("FeedFilterConditions"), list):
+                    fields["FeedFilterConditions"] = {"Items": fields["FeedFilterConditions"]}
+        return values
 
     def campaign(self, cid):
         return copy.deepcopy(next(c for c in self.items["campaigns"] if c["Id"] == cid))
@@ -98,6 +105,9 @@ class FakeDirect:
         else:
             for identifier in params["SelectionCriteria"]["Ids"]:
                 item = next(i for i in self.items[service] if i["Id"] == identifier)
+                if service == "campaigns" and method == "suspend" and item["Status"] == "DRAFT":
+                    results.append({"Errors": [{"Code": 8300, "Details": "Кампания является черновиком и не может быть остановлена"}]})
+                    continue
                 if method == "moderate":
                     item["Status"] = "MODERATION"
                 else:
@@ -171,7 +181,9 @@ class ProductTests(unittest.TestCase):
         saved, row, result = self.create()
         self.assertEqual(result["state"], "applied", result.get("result"))
         cid = result["result"]["campaign_id"]
-        self.assertEqual(self.source.campaign(cid)["State"], "SUSPENDED")
+        self.assertEqual(self.source.campaign(cid)["State"], "OFF")
+        self.assertEqual(result["result"]["status"], "DRAFT")
+        self.assertFalse(any(service == "campaigns" and method == "suspend" for service, method, _ in self.source.writes))
         self.assertTrue(self.products.inspect(cid)["managed"]["complete"])
         self.assertFalse(any(service == "campaigns" and method == "resume" or method == "moderate" for service, method, _ in self.source.writes))
         count = len(self.source.writes)
@@ -189,6 +201,183 @@ class ProductTests(unittest.TestCase):
         with self.assertRaises(Conflict):
             self.propose({"kind": "product_create", "draft_id": saved["id"], "draft_revision": revised["revision"]})
         self.assertEqual(len(self.source.writes), 1)
+
+    def legacy_partial_creation(self):
+        saved = self.products.save_draft(draft())
+        original = self.propose({"kind": "product_create", "draft_id": saved["id"], "draft_revision": 1})
+        self.store.decide(original["id"], 1, "approve", "test-owner")
+        plan = saved["plan"]
+        strategy = self.source.build_unified_bidding_strategy(goal_id=PURCHASE_GOAL, cpa_micros=1000000000,
+                                                             weekly_budget_micros=20000000000, placement_type="search_only")
+        result = self.source.call_v501("campaigns", "add", {"Campaigns": [{"Name": plan["name"],
+            "UnifiedCampaign": {"BiddingStrategy": strategy, "CounterIds": {"Items": [COUNTER_ID]}}}]}).body["result"]
+        cid = result["AddResults"][0]["Id"]
+        stopped = self.source.call_v501("campaigns", "suspend", {"SelectionCriteria": {"Ids": [cid]}}).body["result"]
+        self.products.claim("product_draft_claim:" + saved["id"], original["id"])
+        self.store.set_setting("product_deployed:" + saved["id"], {"campaign_id": cid, "operation": original["id"]})
+        self.store.set_setting("product_campaign:" + str(cid), {"campaign_id": cid, "feed_id": 5, "plan": plan,
+                               "groups": [], "complete": False, "operation": original["id"]})
+        self.store.set_setting("product_operation:" + original["id"], {"target": "production", "steps": [
+            {"service": "campaigns", "method": "add", "status": "confirmed", "ids": [cid]},
+            {"service": "campaigns", "method": "suspend", "status": "rejected_or_partial", "result": stopped}]})
+        self.store.finish(original["id"], "uncertain", {"error": "legacy suspension failure"})
+        return saved, original, {"kind": "product_complete_create", "campaign_id": cid, "source_proposal_id": original["id"]}
+
+    def test_complete_empty_campaign_requires_new_card_and_never_repeats_add(self):
+        _, original, action = self.legacy_partial_creation()
+        count = len(self.source.writes)
+        continuation = self.propose(action)
+        self.assertEqual(len(self.source.writes), count)
+        result = self.approve_fake(continuation)
+        self.assertEqual(result["state"], "applied", result["result"])
+        self.assertEqual(result["result"]["campaign_id"], action["campaign_id"])
+        self.assertEqual(result["result"]["state"], "OFF")
+        self.assertTrue(result["result"]["continued_existing"])
+        self.assertEqual(sum(service == "campaigns" and method == "add" for service, method, _ in self.source.writes), 1)
+        self.assertEqual(self.store.get(original["id"])["state"], "uncertain")
+        with self.assertRaises(Conflict):
+            self.propose(action)
+
+    def test_continuation_rejects_existing_group_and_external_campaign_changes(self):
+        _, _, action = self.legacy_partial_creation()
+        self.source.items["adgroups"] = [{"Id": 999, "CampaignId": action["campaign_id"]}]
+        with self.assertRaises(Conflict):
+            self.propose(action)
+        self.source.items["adgroups"] = []
+        original = copy.deepcopy(self.source.items["campaigns"][0])
+        for change in ({"State": "ON"}, {"Status": "ACCEPTED"}, {"Name": "Changed"}):
+            self.source.items["campaigns"] = [original | change]
+            with self.assertRaises(Conflict):
+                self.propose(action)
+        self.assertEqual(len(self.source.writes), 2)
+
+    def test_inspected_partial_card_can_propose_continuation_but_cannot_replay(self):
+        _, original, action = self.legacy_partial_creation()
+        self.store.finish(original["id"], "partial", {"campaign_id": action["campaign_id"], "error": "Verified empty draft"})
+        row = self.propose(action)
+        self.assertEqual(row["state"], "pending")
+        count = len(self.source.writes)
+        self.approve_fake(original)
+        self.assertEqual(len(self.source.writes), count)
+        self.assertIn("Частично создано", card(self.store.get(original["id"])))
+        self.assertIn(str(action["campaign_id"]), card(self.store.get(original["id"])))
+
+    def test_continuation_blocks_changed_draft_and_missing_original_approval(self):
+        saved, original, action = self.legacy_partial_creation()
+        with self.store.db() as db:
+            db.execute("DELETE FROM events WHERE proposal_id=? AND event='approve'", (original["id"],))
+        with self.assertRaises(Conflict):
+            self.propose(action)
+        self.products.save_draft(draft() | {"name": "Changed"}, saved["id"], 1)
+        with self.assertRaises(Conflict):
+            self.propose(action)
+
+    def test_continuation_partial_failure_cannot_be_replayed(self):
+        _, _, action = self.legacy_partial_creation()
+        row = self.propose(action)
+        self.source.fail = ("adgroups", "add")
+        result = self.approve_fake(row)
+        self.assertEqual(result["state"], "uncertain")
+        with self.assertRaises(Conflict):
+            self.propose(action)
+        count = len(self.source.writes)
+        self.approve_fake(row)
+        self.assertEqual(len(self.source.writes), count)
+
+    def test_unrecognized_partial_creation_cannot_continue(self):
+        _, original, action = self.legacy_partial_creation()
+        journal = self.products.operation(original["id"])
+        journal["steps"][1]["status"] = "requested"
+        self.store.set_setting("product_operation:" + original["id"], journal)
+        with self.assertRaises(Conflict):
+            self.propose(action)
+
+    def test_moderation_of_inactive_draft_is_not_automatic_launch(self):
+        _, _, result = self.create()
+        count = len(self.source.writes)
+        with self.assertRaises(Conflict):
+            self.propose({"kind": "product_moderate", "campaign_id": result["result"]["campaign_id"]})
+        self.assertEqual(len(self.source.writes), count)
+
+    def test_empty_ads_api_result_is_opt_in_not_any_malformed_result(self):
+        direct = Mock()
+        direct.call_v501.return_value.body = {"result": {}}
+        source = DataSource({}, direct=direct, metrika=Mock())
+        self.assertEqual(source.entities("ads", "Ads", {}, allow_empty_result=True), [])
+        with self.assertRaises(ValueError):
+            source.entities("ads", "Ads", {})
+        direct.call_v501.return_value.body = {"result": {"LimitedBy": 1000}}
+        with self.assertRaises(ValueError):
+            source.entities("ads", "Ads", {}, allow_empty_result=True)
+
+    def test_creation_card_does_not_display_zero_campaign_id(self):
+        saved = self.products.save_draft(draft())
+        row = self.propose({"kind": "product_create", "draft_id": saved["id"], "draft_revision": 1})
+        self.assertNotIn("Product pilot (0)", card(row))
+        self.assertNotIn("Product pilot (0)", "".join(detail_pages(row)))
+
+    def test_creation_readback_reconciliation_performs_no_writes(self):
+        with patch.object(self.products, "verify_ad", side_effect=RuntimeError("legacy readback failure")):
+            saved, row, result = self.create()
+        self.assertEqual(result["state"], "uncertain")
+        count = len(self.source.writes)
+        recovered = self.products.reconcile_creation(row["id"])
+        self.assertEqual(recovered["state"], "applied")
+        self.assertTrue(recovered["result"]["reconciled"])
+        self.assertEqual(recovered["result"]["state"], "OFF")
+        self.assertEqual(len(self.source.writes), count)
+        self.assertTrue(self.products.inspect(recovered["result"]["campaign_id"])["managed"]["complete"])
+        with self.assertRaises(Conflict):
+            self.propose({"kind": "product_create", "draft_id": saved["id"], "draft_revision": 1})
+
+    def test_continuation_readback_reconciliation_uses_same_campaign(self):
+        _, _, action = self.legacy_partial_creation()
+        row = self.propose(action)
+        with patch.object(self.products, "verify_ad", side_effect=RuntimeError("legacy readback failure")):
+            result = self.approve_fake(row)
+        self.assertEqual(result["state"], "uncertain")
+        count = len(self.source.writes)
+        recovered = self.products.reconcile_creation(row["id"])
+        self.assertEqual(recovered["result"]["campaign_id"], action["campaign_id"])
+        self.assertEqual(recovered["state"], "applied")
+        self.assertEqual(len(self.source.writes), count)
+
+    def test_creation_reconciliation_rejects_unknown_writes_and_missing_approval(self):
+        with patch.object(self.products, "verify_ad", side_effect=RuntimeError("legacy readback failure")):
+            _, row, _ = self.create()
+        original = self.products.operation(row["id"])
+        altered = copy.deepcopy(original)
+        altered["steps"][-1]["status"] = "requested"
+        self.store.set_setting("product_operation:" + row["id"], altered)
+        with self.assertRaises(Conflict):
+            self.products.reconcile_creation(row["id"])
+        self.store.set_setting("product_operation:" + row["id"], original)
+        with self.store.db() as db:
+            db.execute("DELETE FROM events WHERE proposal_id=? AND event='approve'", (row["id"],))
+        with self.assertRaises(Conflict):
+            self.products.reconcile_creation(row["id"])
+        self.assertEqual(self.store.get(row["id"])["state"], "uncertain")
+
+    def test_creation_reconciliation_rejects_external_ad_and_group_changes(self):
+        with patch.object(self.products, "verify_ad", side_effect=RuntimeError("legacy readback failure")):
+            _, row, _ = self.create()
+        original = copy.deepcopy(self.source.items["adgroups"][0])
+        self.source.items["adgroups"][0]["RegionIds"] = [0]
+        with self.assertRaises(Conflict):
+            self.products.reconcile_creation(row["id"])
+        self.source.items["adgroups"][0] = original
+        self.source.items["ads"][0]["Status"] = "ACCEPTED"
+        with self.assertRaises(Conflict):
+            self.products.reconcile_creation(row["id"])
+
+    def test_filter_readback_accepts_items_but_never_ignores_malformed_conditions(self):
+        group = {"filters": [{"Operand": "categoryId", "Operator": "EQUALS_ANY", "Arguments": ["2"]}], "default_text": "Text"}
+        for filters in (group["filters"], {"Items": group["filters"]}):
+            self.products.verify_ad({"ShoppingAd": {"FeedId": 5, "DefaultTexts": ["Text"], "FeedFilterConditions": filters}}, 5, group)
+        for filters in (None, {}, {"Items": None}, {"Items": ["categoryId"]}, [{"Operand": "categoryId"}],
+                        {"Items": [{"Operand": "categoryId", "Operator": "EQUALS_ANY", "Arguments": ["999"]}]}):
+            with self.assertRaises(RuntimeError):
+                self.products.verify_ad({"ShoppingAd": {"FeedId": 5, "DefaultTexts": ["Text"], "FeedFilterConditions": filters}}, 5, group)
 
     def test_feed_registration_separate_and_no_campaign(self):
         self.source.items["feeds"] = []
@@ -315,6 +504,8 @@ class ProductTests(unittest.TestCase):
         self.assertEqual(self.approve_fake(row)["state"], "applied")
         with self.assertRaises(Conflict):
             self.propose({"kind": "product_launch", "campaign_id": cid})
+        # Existing stopped campaigns remain supported; new OFF/DRAFT campaigns are gated separately.
+        self.source.items["campaigns"][0]["State"] = "SUSPENDED"
         row = self.propose({"kind": "product_moderate", "campaign_id": cid})
         self.assertEqual(self.approve_fake(row)["state"], "applied")
         self.source.items["ads"][0]["Status"] = "ACCEPTED"
@@ -381,6 +572,7 @@ class ProductTests(unittest.TestCase):
         _, _, created = self.create()
         cid = created["result"]["campaign_id"]
         self.source.items["ads"][0]["Status"] = "ACCEPTED"
+        self.source.items["campaigns"][0]["State"] = "SUSPENDED"
         row = self.propose({"kind": "product_launch", "campaign_id": cid})
         self.approve_fake(row)
         with self.store.db() as db:

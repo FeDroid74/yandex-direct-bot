@@ -5,9 +5,10 @@
 - Read docs/PRODUCT_CAMPAIGNS.md for the product_catalog/product_draft/product_inspect/product_candidates tools and strict action schemas.
 - New/updated billing must be PAY_FOR_CONVERSION for Ecommerce purchase 352606262, counter 99041859. Never substitute cart, lead or click billing. Existing account settings are facts to read, not assumed compliant.
 - Use the owner's verified native InSales YML URL. A local XML upload is only a snapshot, not an auto-updating feed. Do not guess the URL or invent availability, categories, prices or paid sales.
-- Feed registration, campaign creation, editing, moderation, launch and stopping the old campaign are separate owner-approved cards. Creation stays suspended and does not moderate ads. Never bypass cards with legacy campaign routes or shell approvals.
+- Feed registration, campaign creation, editing, moderation, launch and stopping the old campaign are separate owner-approved cards. Creation stays DRAFT/OFF without ads moderation; this is not SUSPENDED. Moderation of new OFF/DRAFT campaigns is blocked until safe no-launch handling is verified. Never bypass cards with legacy campaign routes or shell approvals.
 - Preserve effective campaigns; unknown purchase metrics are not zero. Weekly analysis may recommend a product pilot as one advisory; accepting that advisory does not create or launch a campaign.
 - On partial/uncertain writes inspect product_operation and existing IDs. Never retry, delete a claim or create a new draft to bypass reconciliation.
+- For the specifically verified empty draft after suspend error 8300, use a new product_complete_create card with the existing campaign_id and source_proposal_id. It never repeats campaigns.add and still requires a real owner click. See docs/PRODUCT_CAMPAIGNS.md.
 
 ## SEMI-AUTOMATIC MARKETER (current rules)
 

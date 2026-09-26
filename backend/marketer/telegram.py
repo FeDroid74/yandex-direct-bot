@@ -6,6 +6,7 @@ import urllib.request
 LABELS = {"pending": "Ожидает решения", "deferred": "Отложено", "applied": "Применено и проверено",
           "rejected": "Отклонено", "stale": "Данные изменились: нужна новая карточка", "expired": "Срок подтверждения истёк",
           "applying": "Применяется", "uncertain": "Нужна сверка результата, повтор запрещён",
+          "partial": "Частично создано; продолжение отдельной карточкой",
           "accepted_manual": "План одобрен, требуется ручное выполнение", "completed_manual": "Выполнение отмечено пользователем"}
 
 
@@ -48,6 +49,12 @@ def header(row):
     return f"#{row['id']} · v{row['revision']} · {LABELS.get(row['state'], row['state'])}"
 
 
+def campaign_label(row):
+    body = row["body"]
+    cid = (row.get("result") or {}).get("campaign_id") or body["campaign_id"]
+    return body["campaign_name"] + (f" ({cid})" if cid else "")
+
+
 def action_text(body):
     if body.get("product_details"):
         return body["product_details"]
@@ -63,7 +70,7 @@ def action_text(body):
 
 def facts(body):
     if body["evidence"].get("product_workflow"):
-        return "Настройки проверены через API. Прогноз продаж не является подтверждённым результатом."
+        return "Проверены исходные данные для действия. Создание и состояние кампании подтверждаются отдельно. Прогноз продаж не является подтверждённым результатом."
     e, stats = body["evidence"], body["evidence"]["current"]
     goals = e.get("goals", {})
     main = goals.get(str(e["goal_id"]), {})
@@ -110,7 +117,7 @@ def explanation(body):
 
 def card(row):
     b = row["body"]
-    required = [header(row), b["title"], f"{b['campaign_name']} ({b['campaign_id']})", action_text(b), facts(b), "\n".join(b["warnings"])]
+    required = [header(row), b["title"], campaign_label(row), action_text(b), facts(b), "\n".join(b["warnings"])]
     if b["evidence"].get("product_workflow") and row["state"] == "applied":
         result = row.get("result") or {}
         required.append("Результат: " + "; ".join(
@@ -130,7 +137,7 @@ def card(row):
 
 def detail_pages(row):
     b = row["body"]
-    parts = [b["title"], f"{b['campaign_name']} ({b['campaign_id']})", action_text(b), facts(b)]
+    parts = [b["title"], campaign_label(row), action_text(b), facts(b)]
     parts += [f"{label}: {value}" for label, value, _ in explanation(b)]
     parts.append("\n".join(b["warnings"]))
     if b["evidence"].get("goals"):

@@ -35,7 +35,7 @@ class DataSource:
         self.direct = direct or YandexDirectClient.for_target("production")
         self.metrika = metrika or YandexMetrikaClient()
 
-    def entities(self, service, key, params):
+    def entities(self, service, key, params, allow_empty_result=False):
         rows, offset = [], 0
         for _ in range(200):
             for attempt in range(3):
@@ -46,7 +46,7 @@ class DataSource:
                     continue
                 break
             result = checked(response.body)
-            page = result.get(key)
+            page = [] if allow_empty_result and result == {} else result.get(key)
             if not isinstance(page, list):
                 raise ValueError("Missing entity list: " + key)
             rows.extend(page)
