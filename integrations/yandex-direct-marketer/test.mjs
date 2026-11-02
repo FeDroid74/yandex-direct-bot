@@ -43,8 +43,15 @@ try {
   assert.equal(lastBody.decision, "approve");
   assert.equal(lastBody.page, undefined);
   assert.equal(calls, 3);
-  assert.equal(registered.length, 13);
+  assert.equal(registered.length, 14);
   assert.ok(registered.every((tool) => !/approve|execute|apply/.test(tool.name)));
+  globalThis.fetch = async (url, options) => {
+    assert.equal(url, "http://127.0.0.1:8092/context");
+    assert.equal(options.headers.Authorization, "Bearer read-test");
+    assert.deepEqual(JSON.parse(options.body), { batch: 2 });
+    return { ok: true, json: async () => ({ scope: { batch: 2 } }) };
+  };
+  await registered.find((tool) => tool.name === "marketer_context_batch").execute("test", { batch: 2 });
   console.log("Plugin tests passed: owner validation, paged details, native Telegram buttons, no approval tool exposed.");
 } finally {
   rmSync(dir, { recursive: true });

@@ -43,6 +43,12 @@ class Store:
                     data TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS analysis_steps (
+                    run_id TEXT NOT NULL, step_id TEXT NOT NULL, status TEXT NOT NULL,
+                    request_id TEXT NOT NULL, session_key TEXT NOT NULL, input_hash TEXT NOT NULL,
+                    output TEXT, error TEXT, updated REAL NOT NULL,
+                    PRIMARY KEY(run_id, step_id)
+                );
             """)
 
     @contextlib.contextmanager
@@ -152,12 +158,69 @@ class Store:
             # A crash after an API write is not evidence of failure. Never replay it.
             db.execute("UPDATE proposals SET state='uncertain' WHERE state='applying'")
             db.execute("UPDATE proposals SET delivery='uncertain' WHERE delivery='sending'")
-            db.execute("UPDATE runs SET status='interrupted' WHERE status='running'")
+            db.execute("UPDATE runs SET status='interrupted' WHERE status IN ('running','collected','analyzing','publishing')")
 
     def save_run(self, run_id, status, data):
         with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            previous = db.execute("SELECT data FROM runs WHERE id=?", (run_id,)).fetchone()
+            data = {**(json.loads(previous[0]) if previous else {}), **data, "updated_at": time.time()}
             db.execute("INSERT INTO runs VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,data=excluded.data",
                        (run_id, time.time(), status, encode(data)))
+
+    def get_run(self, run_id):
+        with self.db() as db:
+            row = db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+            if row is None:
+                raise Conflict("Analysis run not found")
+            return {**dict(row), "data": json.loads(row["data"])}
+
+    def analysis_step(self, run_id, step_id, message, agent):
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            request_id = str(uuid.uuid4())
+            db.execute("INSERT OR IGNORE INTO analysis_steps VALUES(?,?,'planned',?,?,?,NULL,NULL,?)",
+                       (run_id, step_id, request_id, f"agent:{agent}:analysis:{request_id}", digest(message), time.time()))
+            row = dict(db.execute("SELECT * FROM analysis_steps WHERE run_id=? AND step_id=?", (run_id, step_id)).fetchone())
+            if row["input_hash"] != digest(message):
+                raise Conflict("Analysis input changed; do not reuse an existing request")
+            row["output"] = json.loads(row["output"]) if row["output"] else None
+            return row
+
+    def get_analysis_step(self, run_id, step_id):
+        with self.db() as db:
+            row = db.execute("SELECT * FROM analysis_steps WHERE run_id=? AND step_id=?", (run_id, step_id)).fetchone()
+            return {**dict(row), "output": json.loads(row["output"]) if row["output"] else None}
+
+    def step_update(self, run_id, step_id, status, output=None, error=None):
+        with self.db() as db:
+            db.execute("UPDATE analysis_steps SET status=?,output=?,error=?,updated=? WHERE run_id=? AND step_id=?",
+                       (status, encode(output) if output is not None else None, error, time.time(), run_id, step_id))
+
+    def claim_analysis_step(self, run_id, step_id):
+        with self.db() as db:
+            return db.execute("UPDATE analysis_steps SET status='submitted',updated=? WHERE run_id=? AND step_id=? AND status='planned'",
+                              (time.time(), run_id, step_id)).rowcount == 1
+
+    def step_status(self, run_id):
+        with self.db() as db:
+            return [dict(r) for r in db.execute(
+                "SELECT step_id,status,request_id,error,updated FROM analysis_steps WHERE run_id=? ORDER BY step_id", (run_id,))]
+
+    def analysis_health(self):
+        with self.db() as db:
+            successful = db.execute("SELECT id,created,data FROM runs WHERE status='complete' ORDER BY created DESC LIMIT 1").fetchone()
+            latest = db.execute("SELECT id,created,status,data FROM runs ORDER BY created DESC LIMIT 1").fetchone()
+        result = {"last_successful_analysis": None, "latest_attempt": None}
+        if successful:
+            data = json.loads(successful["data"])
+            result["last_successful_analysis"] = {"id": successful["id"], "at": data.get("completed_at", successful["created"])}
+        if latest:
+            data = json.loads(latest["data"])
+            result["latest_attempt"] = {"id": latest["id"], "at": latest["created"], "status": latest["status"],
+                                        "stage": data.get("stage"), "error": data.get("error"),
+                                        "steps": self.step_status(latest["id"])}
+        return result
 
     def runs(self, limit=4):
         with self.db() as db:

@@ -47,6 +47,7 @@ export default function (api: any) {
   const definitions = [
     ["marketer_status", "/status", "Read autonomous analysis status and independent proposal states.", {}],
     ["marketer_context", "/context", "Read collected Direct/Metrika facts and proposal history, including run id. No live writes.", {}],
+    ["marketer_context_batch", "/context", "Read one numbered context batch when marketer_context returns overview_only. Read every batch before claiming a complete account review. No live writes.", { batch: { type: "integer" } }],
     ["marketer_proposal", "/proposal", "Read one proposal, exact action, evidence and version.", { id: { type: "string" } }],
     ["marketer_propose", "/propose", "Create ONE independently approvable card; never applies changes. Actions: add_negative, ad_text, strategy_value, advisory; product_feed_register, product_create, product_complete_create, product_edit, product_ad_edit, product_moderate, product_launch, product_pause_old. Read docs/PRODUCT_CAMPAIGNS.md for strict schemas. No approval tool.", { proposal: { type: "object", additionalProperties: true } }],
     ["marketer_revise", "/revise", "Edit only the requested pending card. Creates a new version requiring fresh owner approval. Does not change other cards.", { id: { type: "string" }, revision: { type: "integer" }, proposal: { type: "object", additionalProperties: true } }],

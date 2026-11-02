@@ -119,7 +119,7 @@ class CollectedSource(DataSource):
         self.metrika = FakeMetrika()
         self.report_calls = []
 
-    def entities(self, service, key, params):
+    def entities(self, service, key, params, allow_empty_result=False):
         c = snapshot()["campaigns"][0]
         return [{"Id": 1}] if service == "campaigns" else c["groups" if service == "adgroups" else "ads"]
 
@@ -263,15 +263,11 @@ class MultiGoalTests(unittest.TestCase):
 
     def test_model_requires_coverage_not_only_measurement(self):
         runner = Runner(Mock(), Mock(), Mock(), Mock(), POLICY)
-        runner.context = Mock(return_value={"snapshot": {}, "history": []})
         answer = review()
-        def response(*a, **k):
-            return SimpleNamespace(returncode=0, stdout=json.dumps({"payloads": [{"text": json.dumps(answer)}]}))
-        with patch("marketer.runner.subprocess.run", side_effect=response):
-            self.assertEqual(set(runner.model({})["coverage"]), AREAS)
-            del answer["coverage"]["search"]
-            with self.assertRaisesRegex(ValueError, "all marketing areas"):
-                runner.model({})
+        self.assertEqual(set(runner.validate_review(answer)["coverage"]), AREAS)
+        del answer["coverage"]["search"]
+        with self.assertRaisesRegex(ValueError, "all marketing areas"):
+            runner.validate_review(answer)
 
     def test_context_is_readonly_bounded_and_keeps_goal_information(self):
         data = CollectedSource().collect(datetime(2026, 9, 5).date())
@@ -350,13 +346,12 @@ class MultiGoalTests(unittest.TestCase):
         client._get_json.assert_called_once()
 
     def test_oauth_failure_is_actionable_and_never_publishes(self):
+        from marketer.analyst import Analyst
         store, telegram = Mock(), Mock()
-        runner = Runner(store, Mock(), Mock(), telegram, POLICY)
-        runner.context = Mock(return_value={})
         response = SimpleNamespace(returncode=1, stderr="OAuth token refresh failed for openai-codex")
-        with patch("marketer.runner.subprocess.run", return_value=response):
+        with patch("marketer.analyst.subprocess.run", return_value=response):
             with self.assertRaisesRegex(RuntimeError, "повторного входа"):
-                runner.model({})
+                Analyst(store, POLICY).rpc("agent", {})
         self.assertEqual(store.set_setting.call_args.args[1]["status"], "reauthentication_required")
         telegram.publish.assert_not_called()
 

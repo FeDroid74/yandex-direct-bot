@@ -1,6 +1,5 @@
 import copy
 import json
-import subprocess
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -11,6 +10,8 @@ from marketer.data import sufficient, totals
 from marketer.store import digest
 from marketer.schedule import weekly_slot
 from marketer.products import replacement_candidates
+from marketer.analyst import Analyst
+from marketer.errors import safe_error
 
 
 AREAS = {"economics", "search", "rsya", "creative", "landing", "assortment", "experiment", "measurement"}
@@ -40,7 +41,7 @@ class Runner:
             self.telegram.notify(message)
             self.store.set_setting("notification:" + kind, signature)
 
-    def context(self, snapshot):
+    def context(self, snapshot, bounded=True):
         if not snapshot:
             return {"snapshot": None, "history": []}
         compact = copy.deepcopy(snapshot)
@@ -68,18 +69,22 @@ class Runner:
             c["ads"] = sorted(c["ads"], key=lambda a: a["Id"] in ad_ids, reverse=True)[:6]
             for ad in c["ads"]:
                 ad.pop("CampaignId", None)
+            c["groups_total_rows"] = len(c["groups"])
+            relevant_groups = {str(r.get("AdGroupId")) for r in c["queries"] + c["ad_performance"] + c["ads"]}
+            c["groups"] = sorted(c["groups"], key=lambda g: str(g["Id"]) in relevant_groups, reverse=True)[:60]
             for key in ("metrika_queries", "landing_pages"):
                 if key in c:
                     c[key]["total_rows"] = len(c[key]["rows"])
                     c[key]["rows"] = [{k: v for k, v in r.items() if k != "dimension_key"} for r in c[key]["rows"][:8]]
         history = [{"id": r["id"], "state": r["state"], "title": r["body"]["title"],
-                    "campaign_id": r["body"]["campaign_id"], "action": r["body"]["action"]} for r in self.store.list(40)]
+                    "campaign_id": r["body"]["campaign_id"], "action": r["body"]["action"]} for r in self.store.list(40)
+                   if r["body"]["campaign_id"] in {c["Id"] for c in compact["campaigns"]}]
         compact["model_input_sampled"] = True
         for _ in range(5):
             result = {"snapshot": compact, "history": history,
                       "product_replacement_review": replacement_candidates(snapshot),
                       "product_catalog": self.store.setting("product_catalog_last")}
-            if len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()) <= 80000:
+            if not bounded or self.context_size(result) <= self.policy.get("model_context_max_bytes", 70000):
                 return result
             for c in compact["campaigns"]:
                 for key in ("queries", "ad_performance", "placements", "ads"):
@@ -87,47 +92,112 @@ class Runner:
                 for key in ("metrika_queries", "landing_pages"):
                     if key in c:
                         c[key]["rows"] = c[key]["rows"][:max(2, len(c[key]["rows"])//2)]
-        raise ValueError("Analysis input exceeds safe size; split campaign scope in policy")
+        raise ValueError("One analysis batch exceeds safe size; inspect campaign metadata, no campaigns were silently discarded")
+
+    @staticmethod
+    def context_size(value):
+        return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())
+
+    def contexts(self, snapshot):
+        batches, campaigns = [], []
+        limit = self.policy.get("model_context_max_bytes", 70000)
+        for campaign in snapshot["campaigns"]:
+            trial = self.context({**snapshot, "campaigns": campaigns + [campaign]}, bounded=False)
+            if campaigns and self.context_size(trial) > limit:
+                batches.append(self.context({**snapshot, "campaigns": campaigns}))
+                campaigns = []
+            campaigns.append(campaign)
+        if campaigns:
+            batches.append(self.context({**snapshot, "campaigns": campaigns}))
+        for index, batch in enumerate(batches):
+            batch["scope"] = {"batch": index + 1, "batches": len(batches), "account_campaign_count": len(snapshot["campaigns"]),
+                              "campaign_ids": [c["Id"] for c in batch["snapshot"]["campaigns"]]}
+        return batches
+
+    def context_page(self, snapshot, batch=None):
+        if not snapshot:
+            return {"snapshot": None, "history": []}
+        contexts = self.contexts(snapshot)
+        if batch is not None:
+            if type(batch) is not int or not 1 <= batch <= len(contexts):
+                raise ValueError("Invalid context batch")
+            return contexts[batch - 1]
+        if len(contexts) == 1:
+            return contexts[0]
+        return {"overview_only": True, "run_id": snapshot.get("run_id"),
+                "batches": [c["scope"] for c in contexts],
+                "message": "Read each context batch; the account exceeds one bounded model input."}
 
     def model(self, snapshot):
-        context = self.context(snapshot)
+        run_id = snapshot.get("run_id") or uuid.uuid4().hex[:16]
+        plan_key = "analysis_plan:" + run_id
+        plan = self.store.setting(plan_key)
+        if plan is None:
+            plan = self.contexts(snapshot)
+            self.store.set_setting(plan_key, plan)
+        if not plan:
+            raise ValueError("No complete campaigns to analyze")
         prompt = Path(__file__).with_name("analyst_prompt.txt").read_text(encoding="utf-8")
-        message = prompt + "\nДАННЫЕ:\n" + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
-        request_id = str(uuid.uuid4())
-        params = {"agentId": self.policy["analyst_agent"], "message": message,
-                  "sessionKey": f"agent:{self.policy['analyst_agent']}:analysis:{request_id}",
-                  "idempotencyKey": request_id, "thinking": "medium", "timeout": 600, "deliver": False}
-        completed = subprocess.run([self.policy["openclaw_command"], "gateway", "call", "agent", "--params",
-                                    json.dumps(params, ensure_ascii=False), "--expect-final", "--timeout", "630000", "--json"],
-                                   capture_output=True, text=True, timeout=660)
-        if completed.returncode:
-            if "OAuth token refresh failed" in completed.stderr:
-                self.store.set_setting("analyst_auth", {"status": "reauthentication_required", "checked_at": time.time()})
-                raise RuntimeError("OpenClaw требует повторного входа в ChatGPT: OAuth не обновляется. Доступ к Директу и Метрике от этого не зависит; рекламные изменения не выполнялись.")
-            raise RuntimeError("OpenClaw analyst failed: " + completed.stderr[-1000:])
-        output = completed.stdout
-        # The CLI can prepend plugin registration logs before its JSON response.
-        decoder = json.JSONDecoder()
-        envelope = None
-        for i, char in enumerate(output):
-            if char != "{":
-                continue
-            try:
-                value, _ = decoder.raw_decode(output[i:])
-                if isinstance(value, dict) and ("result" in value or "payloads" in value):
-                    envelope = value
-                    break
-            except ValueError:
-                pass
-        if envelope is None:
-            raise ValueError("Missing OpenClaw JSON result")
-        if envelope.get("result", envelope).get("meta", {}).get("stopReason") == "error":
-            raise ValueError("OpenClaw model rejected the request; inspect model availability")
-        payloads = envelope.get("result", envelope).get("payloads", [])
-        answer = "\n".join(p.get("text", "") for p in payloads)
-        result = json.loads(answer)
+        analyst = Analyst(self.store, self.policy)
+        results = []
+        for index, context in enumerate(plan):
+            scope = set(context["scope"]["campaign_ids"])
+            def validate(result, scope=scope):
+                self.validate_review(result)
+                if any(p.get("campaign_id") not in scope for p in result["proposals"]):
+                    raise ValueError("Proposal references a campaign outside its analysis batch")
+                return result
+            results.append(analyst.call(run_id, f"batch-{index + 1:03d}", context, prompt, validate))
+        if len(results) == 1:
+            return results[0]
+        # Hierarchical selection keeps every batch in the review without growing one giant prompt.
+        merge_prompt = prompt + "\nЭто итоговый отбор по результатам частей одного снимка. Не складывай повторяющиеся показатели. " \
+            "Не создавай и не переписывай действия. Верни JSON с summary, coverage всех восьми областей и " \
+            "selected_ids: массив ID выбранных кандидатов (не более 8). Учитывай все обзоры, не только первую кампанию."
+        level = 0
+        while len(results) > 1:
+            merged = []
+            for offset in range(0, len(results), 2):
+                parts = results[offset:offset+2]
+                if len(parts) == 1:
+                    merged.append(parts[0])
+                    continue
+                candidates = {}
+                for part in parts:
+                    for candidate in part["proposals"]:
+                        candidates.setdefault(digest(candidate), candidate)
+                context = {"date_from": snapshot["current_from"], "date_to": snapshot["date_to"],
+                           "account_overview": [{"campaign_id": c["Id"], "name": c["Name"], "goal_id": c["goal_id"],
+                                                 "attribution": c["attribution"],
+                                                 "current": {k: c["current"].get(k) for k in
+                                                             ("Clicks", "Cost", "Conversions", "ConversionsComplete", "CPA")}}
+                                                for c in snapshot["campaigns"]],
+                           "reviews": [{"summary": p.get("summary"), "coverage": p["coverage"]} for p in parts],
+                           "candidates": [{"id": k, **v} for k, v in candidates.items()]}
+                def select(result, candidates=candidates):
+                    ids = result.get("selected_ids") if isinstance(result, dict) else None
+                    if not isinstance(ids, list) or any(not isinstance(k, str) or k not in candidates for k in ids) or len(ids) != len(set(ids)):
+                        raise ValueError("Invalid portfolio selection; actions cannot be invented")
+                    self.validate_review({**result, "proposals": [candidates[k] for k in ids]})
+                    return result
+                choice = analyst.call(run_id, f"merge-{level:02d}-{offset:03d}", context, merge_prompt, select)
+                merged.append({"summary": choice.get("summary"), "coverage": choice["coverage"],
+                               "proposals": [candidates[k] for k in choice["selected_ids"]]})
+            results, level = merged, level + 1
+        return results[0]
+
+    def validate_review(self, result):
         if not isinstance(result, dict) or not isinstance(result.get("proposals"), list):
             raise ValueError("Invalid analyst output")
+        if any(not isinstance(p, dict) for p in result["proposals"]):
+            raise ValueError("Invalid proposal object")
+        if any(not isinstance(p.get("action"), dict) or p["action"].get("kind") not in
+               {"add_negative", "ad_text", "strategy_value", "advisory"} for p in result["proposals"]):
+            raise ValueError("Weekly analysis cannot create, launch, or stop campaigns")
+        if not isinstance(result.get("summary"), str) or len(result["summary"]) > 2500:
+            raise ValueError("Invalid analyst summary")
+        if self.context_size(result) > 35000:
+            raise ValueError("Analyst output exceeds safe size; no cards published")
         if len(result["proposals"]) > self.policy["max_proposals_per_run"]:
             raise ValueError("Too many proposals; no cards published")
         coverage = result.get("coverage")
@@ -137,7 +207,6 @@ class Runner:
             if (not isinstance(review, dict) or review.get("status") not in ("proposal", "no_action", "insufficient_data") or
                     not isinstance(review.get("reason"), str) or not 1 <= len(review["reason"].strip()) <= 600):
                 raise ValueError("Invalid marketing coverage: " + area)
-        self.store.set_setting("analyst_auth", {"status": "ready", "checked_at": time.time()})
         return result
 
     def evaluations(self):
@@ -182,63 +251,110 @@ class Runner:
                                  + data["conclusion"] + ("\nВыборка недостаточна или неполна; итог не определён." if after["Conversions"] < 5 or not after["ConversionsComplete"] else ""))
             self.store.evaluate(row["id"], data)
 
-    def run(self, force=False, collect_only=False, scheduled=False):
+    def run(self, force=False, collect_only=False, scheduled=False, resume_run_id=None, publish=True):
         last = self.store.setting("last_attempt", 0)
         slot = weekly_slot(time.time(), self.policy.get("schedule_timezone", "Europe/Podgorica")) if scheduled else None
-        if scheduled and (force or collect_only):
+        if scheduled and (force or collect_only or resume_run_id or not publish):
             raise ValueError("Scheduled analysis cannot be forced or collection-only")
+        if resume_run_id and (force or collect_only):
+            raise ValueError("Resume cannot be combined with force or collection-only")
         if scheduled and not self.store.claim_schedule(slot):
             return {"status": "already_scheduled", "schedule_slot": slot}
-        if not scheduled and not force and time.time()-last < self.policy["min_run_interval_days"]*86400 - 300:
+        if not resume_run_id and not scheduled and not force and time.time()-last < self.policy["min_run_interval_days"]*86400 - 300:
             return {"status": "not_due"}
-        self.store.set_setting("last_attempt", time.time())
-        run_id = uuid.uuid4().hex[:16]
-        self.store.save_run(run_id, "running", {})
+        if resume_run_id:
+            prior = self.store.get_run(resume_run_id)
+            if prior["status"] in ("complete", "skipped", "collected_only"):
+                raise ValueError("This run does not need recovery")
+            if time.time() - prior["created"] > 7 * 86400:
+                raise ValueError("Run is too old to resume; collect fresh statistics")
+            run_id, data = resume_run_id, prior["data"]
+        else:
+            self.store.set_setting("last_attempt", time.time())
+            run_id, data = uuid.uuid4().hex[:16], {}
+        stage = "collection"
+        self.store.save_run(run_id, "running", {"stage": stage, "error": None, "publish_requested": publish})
         try:
-            snapshot = self.source.collect()
+            snapshot = data.get("snapshot") or self.source.collect()
             snapshot["run_id"] = run_id
-            snapshot["schedule_slot"] = slot
+            if not resume_run_id:
+                snapshot["schedule_slot"] = slot
             self.store.set_setting("latest_snapshot", snapshot)
+            self.store.save_run(run_id, "collected", {"snapshot": snapshot, "stage": "data_gate"})
             catalog = self.store.setting("product_catalog_last")
-            if isinstance(catalog, dict) and catalog.get("url"):
+            if not resume_run_id and isinstance(catalog, dict) and catalog.get("url"):
                 try:
                     inspected = self.actions.products.catalog(catalog["url"])
                 except Exception as exc:
                     self.store.set_setting("product_catalog_last", {"url": catalog["url"], "status": "unavailable",
                                                                    "checked_at": time.time(), "error": type(exc).__name__})
-                    self.notify_once("product_feed_unavailable", "Не удалось обновить данные товарного фида. Актуальность ассортимента не подтверждена; кампании автоматически не изменялись.")
+                    if publish:
+                        self.notify_once("product_feed_unavailable", "Не удалось обновить данные товарного фида. Актуальность ассортимента не подтверждена; кампании автоматически не изменялись.")
                 else:
-                    if inspected["invalid_count"] or inspected["unavailable"]:
+                    if publish and (inspected["invalid_count"] or inspected["unavailable"]):
                         self.notify_once("product_feed_invalid", "Товарная выгрузка требует проверки: в ней есть некорректные или отсутствующие товары. Проверьте настройки остатков и исключения товаров в InSales. Кампании автоматически не изменялись.")
             allowed, reason = sufficient(snapshot, self.store.setting("last_analyzed_snapshot"), self.policy)
+            if resume_run_id and data.get("gate_allowed"):
+                allowed, reason = True, data.get("gate", "resuming_saved_analysis")
             if slot in self.policy.get("required_review_slots", []) and sufficient(snapshot, None, self.policy)[0]:
                 allowed, reason = True, "owner_requested_calendar_review"
-            self.store.save_run(run_id, "collected", {"snapshot": snapshot, "gate": reason})
-            if snapshot["errors"]:
+            self.store.save_run(run_id, "collected", {"snapshot": snapshot, "gate": reason, "gate_allowed": allowed})
+            if publish and snapshot["errors"]:
                 self.notify_once("data_errors", "Анализ Директа: часть данных недоступна. Для этих кампаний решения не формируются.\n" + json.dumps(snapshot["errors"], ensure_ascii=False)[:2500])
-            if not collect_only:
-                self.evaluations()
+            if not collect_only and publish and not data.get("evaluations_checked"):
+                try:
+                    self.evaluations()
+                    self.store.save_run(run_id, "collected", {"evaluations_checked": True})
+                except Exception as exc:
+                    self.store.save_run(run_id, "collected", {"evaluation_error": safe_error(exc)})
+                    self.notify_once("evaluation_error", "Не завершена оценка прежних изменений. Новый анализ продолжается; причина сохранена в журнале.")
             if not allowed or collect_only:
                 status = "collected_only" if collect_only else "skipped"
-                self.store.save_run(run_id, status, {"snapshot": snapshot, "gate": reason, "model_called": False})
+                self.store.save_run(run_id, status, {"snapshot": snapshot, "gate": reason, "model_called": False, "stage": "finished"})
                 return {"status": status, "gate": reason, "run_id": run_id, "campaigns": len(snapshot["campaigns"]), "errors": snapshot["errors"]}
-            analysis = self.model(snapshot)
-            published, rejected = [], []
+            stage = "analysis"
+            self.store.save_run(run_id, "analyzing", {"stage": stage, "model_called": True})
+            analysis = data.get("analysis") or self.model(snapshot)
+            self.store.save_run(run_id, "analyzing", {"analysis": analysis, "summary": analysis.get("summary"), "coverage": analysis.get("coverage")})
+            published, rejected, prepared = list(data.get("published", [])), [], []
             for raw in analysis["proposals"]:
                 try:
                     body = self.actions.prepare(raw, snapshot)
-                    row, fresh = self.store.create(body)
-                    if fresh:
-                        self.telegram.publish(row, self.store)
-                        published.append(row["id"])
+                    prepared.append(body)
                 except (ValueError, KeyError) as exc:
-                    rejected.append({"title": str(raw.get("title", ""))[:180] if isinstance(raw, dict) else "invalid", "error": str(exc)[:500]})
+                    rejected.append({"title": str(raw.get("title", ""))[:180] if isinstance(raw, dict) else "invalid", "error": safe_error(exc, 500)})
+            if not publish:
+                self.store.save_run(run_id, "preview_ready", {"stage": "preview", "rejected": rejected, "prepared_count": len(prepared)})
+                return {"status": "preview_ready", "run_id": run_id, "prepared_count": len(prepared), "rejected": rejected}
+            stage = "publication"
+            self.store.save_run(run_id, "publishing", {"stage": stage, "rejected": rejected})
+            delivery_issues = []
+            for body in prepared:
+                row, fresh = self.store.create(body)
+                if fresh or row["body"]["evidence"].get("run_id") == run_id:
+                    if row["delivery"] == "pending":
+                        self.telegram.publish(row, self.store)
+                        row = self.store.get(row["id"])
+                    if row["delivery"] == "sent":
+                        if row["id"] not in published:
+                            published.append(row["id"])
+                    else:
+                        delivery_issues.append({"id": row["id"], "delivery": row["delivery"]})
+                    self.store.save_run(run_id, "publishing", {"published": published, "delivery_issues": delivery_issues})
+            if delivery_issues:
+                self.store.save_run(run_id, "delivery_uncertain", {"stage": stage, "delivery_issues": delivery_issues})
+                return {"status": "delivery_uncertain", "run_id": run_id, "published": published, "delivery_issues": delivery_issues}
             self.store.set_setting("last_analyzed_snapshot", snapshot)
             self.store.save_run(run_id, "complete", {"snapshot": snapshot, "summary": analysis.get("summary"), "coverage": analysis.get("coverage"),
-                                                     "published": published, "rejected": rejected, "model_called": True})
+                                                     "published": published, "rejected": rejected, "model_called": True,
+                                                     "stage": "finished", "completed_at": time.time(), "error": None})
             return {"status": "complete", "run_id": run_id, "published": published, "rejected": rejected}
         except Exception as exc:
-            error = str(exc)[:1600]
-            self.store.save_run(run_id, "failed", {"error": error})
-            self.notify_once("run_error", "Автономный анализ не завершён. Кампании не менялись. Нужна проверка интеграции.\n" + error)
+            error = safe_error(exc)
+            self.store.save_run(run_id, "failed", {"error": error, "stage": stage})
+            if publish:
+                try:
+                    self.notify_once("run_error", "Автономный анализ не завершён. Кампании не менялись. Прогресс сохранён.\n" + error)
+                except Exception as notification_error:
+                    self.store.save_run(run_id, "failed", {"notification_error": safe_error(notification_error)})
             raise

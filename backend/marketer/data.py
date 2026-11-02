@@ -4,11 +4,13 @@ import io
 import json
 import math
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from marketer.diagnostics import campaign_diagnostics
+from marketer.errors import ReadError, failure
 from services.direct_client import YandexDirectClient, YandexDirectClientError
 from services.metrika_client import YandexMetrikaClient, YandexMetrikaClientError
 
@@ -45,7 +47,10 @@ class DataSource:
                     time.sleep(2 ** attempt)
                     continue
                 break
-            result = checked(response.body)
+            if not isinstance(response.body, dict) or response.body.get("error") or not isinstance(response.body.get("result"), dict):
+                raise ReadError("direct", service + ".get", status=getattr(response, "status_code", None), payload=response.body,
+                                params={k: params[k] for k in ("SelectionCriteria", "FieldNames") if k in params})
+            result = response.body["result"]
             page = [] if allow_empty_result and result == {} else result.get(key)
             if not isinstance(page, list):
                 raise ValueError("Missing entity list: " + key)
@@ -101,7 +106,21 @@ class DataSource:
             req = urllib.request.Request(self.direct._build_reports_url(),
                                          data=json.dumps({"params": params}).encode(),
                                          headers=self.direct._build_reports_headers(), method="POST")
-            with urllib.request.urlopen(req, timeout=90) as response:
+            try:
+                response = urllib.request.urlopen(req, timeout=90)
+            except urllib.error.HTTPError as exc:
+                try:
+                    payload = json.loads(exc.read(16384))
+                except (ValueError, UnicodeDecodeError):
+                    payload = {"error": {"message": "Non-JSON error body omitted"}}
+                error = ReadError("direct", "reports", status=exc.code, payload=payload,
+                                  params={"campaign_id": cid, "report_type": kind, "date_from": start, "date_to": end,
+                                          "fields": params["FieldNames"], "goals": params["Goals"], "attribution": attribution})
+                if exc.code in (429, 500, 502, 503, 504) and attempt < 2:
+                    time.sleep(2 ** attempt)
+                    continue
+                raise error from exc
+            with response:
                 if response.status in (201, 202):
                     delay = min(60, max(1, int(response.headers.get("retryIn", "5"))))
                     if attempt == 4:
@@ -235,7 +254,7 @@ class DataSource:
             measurement["goals"] = {str(g["id"]): {k: g[k] for k in ("id", "name", "type", "status", "conditions", "goal_source") if k in g} for g in catalog}
             measurement["catalog_complete"] = True
         except Exception as exc:
-            measurement["errors"].append(str(exc)[:600])
+            measurement["errors"].append(failure(exc, operation="metrika.counter_and_goals"))
             measurement["catalog_complete"] = False
         for basic in campaigns:
             cid = basic["Id"]
@@ -264,8 +283,8 @@ class DataSource:
                     c["period_reports"][period] = aggregate
                     c[period] = totals(aggregate, observed_goals)
                     c[period]["source"] = "direct_period_report"
-                c["groups"] = self.entities("adgroups", "AdGroups", {"SelectionCriteria": {"CampaignIds": [cid]}, "FieldNames": ["Id", "Name", "CampaignId", "NegativeKeywords", "Status", "ServingStatus"]})
-                c["ads"] = self.entities("ads", "Ads", {"SelectionCriteria": {"CampaignIds": [cid]}, "FieldNames": ["Id", "AdGroupId", "CampaignId", "State", "Status", "Type"], "TextAdFieldNames": ["Title", "Title2", "Text", "Href", "AdImageHash"], "ShoppingAdFieldNames": ["FeedId", "DefaultTexts", "FeedFilterConditions"]})
+                c["groups"] = self.entities("adgroups", "AdGroups", {"SelectionCriteria": {"CampaignIds": [cid]}, "FieldNames": ["Id", "Name", "CampaignId", "NegativeKeywords", "Status", "ServingStatus"]}, allow_empty_result=True)
+                c["ads"] = self.entities("ads", "Ads", {"SelectionCriteria": {"CampaignIds": [cid]}, "FieldNames": ["Id", "AdGroupId", "CampaignId", "State", "Status", "Type"], "TextAdFieldNames": ["Title", "Title2", "Text", "Href", "AdImageHash"], "ShoppingAdFieldNames": ["FeedId", "DefaultTexts", "FeedFilterConditions"]}, allow_empty_result=True)
                 c["queries"] = self.report(cid, split.isoformat(), end.isoformat(), "SEARCH_QUERY_PERFORMANCE_REPORT", ["CampaignId", "AdGroupId", "Query"], goal_id, attribution, goals) if c["placement"] != "network_only" else []
                 c["ad_performance"] = self.report(cid, split.isoformat(), end.isoformat(), "AD_PERFORMANCE_REPORT", ["AdId", "AdGroupId", "CampaignId", "AdNetworkType"], goal_id, attribution, goals)
                 c["placements"] = self.report(cid, split.isoformat(), end.isoformat(), "CUSTOM_REPORT", ["CampaignId", "AdNetworkType", "Placement"], goal_id, attribution, goals) if c["placement"] != "search_only" else []
@@ -275,22 +294,22 @@ class DataSource:
                     try:
                         c["metrika_periods"][period] = self.metrika_report(cid, period_start, period_end, goal_id, extra_goals=goals)["totals"]
                     except Exception as exc:
-                        c["metrika_errors"].append({"report": period, "error": str(exc)[:600]})
+                        c["metrika_errors"].append(failure(exc, report=period, operation="metrika.campaign_totals"))
                 for key, dimension in [("metrika_queries", "ym:s:lastsignDirectSearchPhrase"), ("landing_pages", "ym:s:startURLPath")]:
                     try:
                         c[key] = self.metrika_report(cid, split.isoformat(), end.isoformat(), goal_id, dimension, goals)
                     except Exception as exc:
-                        c["metrika_errors"].append({"report": key, "error": str(exc)[:600]})
+                        c["metrika_errors"].append(failure(exc, report=key, operation="metrika.dimensions"))
                 result["campaigns"].append(c)
             except Exception as exc:
-                result["errors"].append({"campaign_id": cid, "error": str(exc)[:900]})
+                result["errors"].append(failure(exc, campaign_id=cid))
         all_goals = sorted({self.policy["goal_id"]} | {g for c in result["campaigns"] for g in c["strategy_goals"]} |
                            {int(g) for g in measurement["goals"]})
         for period, period_start, period_end in (("current", split.isoformat(), end.isoformat()), ("previous", start.isoformat(), (split-timedelta(days=1)).isoformat())):
             try:
                 measurement[period] = self.metrika_report(None, period_start, period_end, self.policy["goal_id"], extra_goals=all_goals)["totals"]
             except Exception as exc:
-                measurement["errors"].append({"report": period, "error": str(exc)[:600]})
+                measurement["errors"].append(failure(exc, report=period, operation="metrika.counter_totals"))
         for c in result["campaigns"]:
             c["diagnostics"] = campaign_diagnostics(c, measurement)
         return result

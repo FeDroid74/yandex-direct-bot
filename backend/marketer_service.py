@@ -70,11 +70,14 @@ def serve():
                     raise ValueError("Expected JSON object")
                 if self.path == "/status":
                     runs = [{**{k: v for k, v in r.items() if k != "data"}, "coverage": r["data"].get("coverage"),
-                             "summary": r["data"].get("summary"), "model_called": r["data"].get("model_called")} for r in store.runs()]
+                             "summary": r["data"].get("summary"), "model_called": r["data"].get("model_called"),
+                             "stage": r["data"].get("stage"), "error": r["data"].get("error"),
+                             "gate": r["data"].get("gate"), "updated_at": r["data"].get("updated_at")} for r in store.runs()]
                     result = {"runs": runs, "policy": runner.policy, "analyst_auth": store.setting("analyst_auth", {"status": "not_checked"}),
+                              "analysis_health": store.analysis_health(), "running": run_lock.locked(),
                               "proposals": [{"id": r["id"], "revision": r["revision"], "state": r["state"], "title": r["body"]["title"]} for r in store.list(50)]}
                 elif self.path == "/context":
-                    result = runner.context(store.setting("latest_snapshot"))
+                    result = runner.context_page(store.setting("latest_snapshot"), params.get("batch"))
                 elif self.path == "/proposal":
                     result = store.get(params["id"])
                 elif self.path == "/products/catalog":
@@ -120,12 +123,27 @@ def serve():
                             pass
                         result = {"text": card(row), "state": row["state"]}
                 elif self.path == "/run":
+                    if set(params) - {"force", "collect_only", "scheduled", "resume_run_id", "publish"}:
+                        raise ValueError("Unexpected analysis parameter")
+                    for key in ("force", "collect_only", "scheduled", "publish"):
+                        if key in params and type(params[key]) is not bool:
+                            raise ValueError("Analysis flags must be booleans")
+                    if "resume_run_id" in params:
+                        if not isinstance(params["resume_run_id"], str):
+                            raise ValueError("Invalid run id")
+                        store.get_run(params["resume_run_id"])
+                    if params.get("scheduled") and (params.get("force") or params.get("collect_only") or
+                                                     params.get("resume_run_id") or params.get("publish") is False):
+                        raise ValueError("Invalid scheduled analysis options")
+                    if params.get("resume_run_id") and (params.get("force") or params.get("collect_only")):
+                        raise ValueError("Resume cannot force a new collection")
                     if not run_lock.acquire(blocking=False):
                         raise Conflict("Анализ уже выполняется.")
                     def work():
                         try:
                             runner.run(force=params.get("force") is True, collect_only=params.get("collect_only") is True,
-                                       scheduled=params.get("scheduled") is True)
+                                       scheduled=params.get("scheduled") is True, resume_run_id=params.get("resume_run_id"),
+                                       publish=params.get("publish", True))
                         except Exception:
                             pass  # Runner persists and notifies the failure.
                         finally:
