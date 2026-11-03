@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 import time
 
@@ -7,6 +8,15 @@ from marketer.errors import safe_error
 
 class AnalystUnavailable(RuntimeError):
     pass
+
+
+class NotDispatched(AnalystUnavailable):
+    pass
+
+
+def connection_failed_before_dispatch(error):
+    # OpenClaw 2026.3.13 only calls the RPC from onHelloOk; this is connect's catch.
+    return bool(re.search(r"(?m)^gateway connect failed: Error: gateway (?:closed \([0-9]+\):|not connected(?:\s|$))", str(error)))
 
 
 def json_response(output):
@@ -59,6 +69,8 @@ class Analyst:
         if completed.returncode:
             raw_error = getattr(completed, "stderr", "")
             error = safe_error(raw_error)
+            if connection_failed_before_dispatch(raw_error) and not any(key in completed.stdout for key in ('"runId"', '"payloads"')):
+                raise NotDispatched("OpenClaw agent connection failed before RPC dispatch: " + error[-1000:])
             if "OAuth token refresh failed" in raw_error:
                 self.store.set_setting("analyst_auth", {"status": "reauthentication_required", "checked_at": time.time()})
                 raise AnalystUnavailable("OpenClaw требует повторного входа в ChatGPT; OAuth не обновляется.")
@@ -85,14 +97,29 @@ class Analyst:
             raise AnalystUnavailable("Stored analyst answer is invalid; inspect step " + step_id)
         answer = None
         try:
-            if step["status"] == "planned" and self.store.claim_analysis_step(run_id, step_id):
+            if step["status"] in ("submitted", "uncertain") and connection_failed_before_dispatch(step.get("error")):
+                history = self.read_rpc("chat.history", {"sessionKey": step["session_key"], "limit": 10})
+                if history.get("messages") == []:
+                    self.store.step_update(run_id, step_id, "not_dispatched", error=step["error"])
+                    step["status"] = "not_dispatched"
+            if step["status"] in ("planned", "not_dispatched") and self.store.claim_analysis_step(run_id, step_id):
                 try:
-                    accepted = self.rpc("agent", {"agentId": self.policy["analyst_agent"], "message": message,
-                        "sessionKey": step["session_key"], "idempotencyKey": step["request_id"],
-                        "thinking": "medium", "timeout": 600, "deliver": False})
+                    for attempt in range(3):
+                        try:
+                            accepted = self.rpc("agent", {"agentId": self.policy["analyst_agent"], "message": message,
+                                "sessionKey": step["session_key"], "idempotencyKey": step["request_id"],
+                                "thinking": "medium", "timeout": 600, "deliver": False})
+                            break
+                        except NotDispatched as exc:
+                            if attempt == 2:
+                                self.store.step_update(run_id, step_id, "not_dispatched", error=safe_error(exc))
+                                raise
+                            time.sleep(2 ** attempt)
                     answer = answer_from(accepted)
                     if accepted.get("runId", step["request_id"]) != step["request_id"]:
                         raise AnalystUnavailable("Unexpected OpenClaw run identity")
+                except NotDispatched:
+                    raise
                 except AnalystUnavailable as exc:
                     if "повторного входа" in str(exc):
                         raise
@@ -127,7 +154,7 @@ class Analyst:
             return result
         except Exception as exc:
             current = self.store.get_analysis_step(run_id, step_id)
-            if current["status"] != "invalid":
+            if current["status"] not in ("invalid", "not_dispatched"):
                 self.store.step_update(run_id, step_id, "uncertain", error=safe_error(exc))
             auth = self.store.setting("analyst_auth", {})
             if auth.get("status") != "reauthentication_required":

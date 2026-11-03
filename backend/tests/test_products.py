@@ -579,9 +579,11 @@ class ProductTests(unittest.TestCase):
             db.execute("UPDATE proposals SET applied_at=? WHERE id=?", (time.time() - 40 * 86400, row["id"]))
         self.source.report = Mock(return_value=[{"Clicks": 100, "Impressions": 2000, "Cost": 1000, "Conversions": 1, "conversions_by_goal": {str(PURCHASE_GOAL): 1}}])
         telegram = Mock()
-        Runner(self.store, self.source, self.actions, telegram, {"conversion_lag_days": 7}).evaluations()
+        Runner(self.store, self.source, self.actions, telegram, {"conversion_lag_days": 7, "goal_id": PURCHASE_GOAL}).evaluations()
         self.assertEqual(self.source.report.call_args.args[5], PURCHASE_GOAL)
-        self.assertIsNotNone(self.store.get(row["id"])["evaluated_at"])
+        self.assertEqual(self.source.report.call_count, 1)
+        self.assertIsNone(self.store.get(row["id"])["evaluated_at"])
+        self.assertEqual(self.store.observation(row["id"])["data"]["status"], "insufficient_data")
         telegram.notify.assert_called_once()
 
     def test_unknown_purchase_never_means_zero(self):

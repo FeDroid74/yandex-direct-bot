@@ -7,6 +7,7 @@ from marketer.data import checked, number
 from marketer.store import Conflict
 from marketer.products import KINDS, Products
 from marketer.telegram import card
+from marketer.experiments import configuration
 
 
 AREAS = {"economics", "search", "rsya", "creative", "landing", "assortment", "experiment", "measurement"}
@@ -130,6 +131,7 @@ class Actions:
                              "strategy_goals": campaign.get("strategy_goals", []),
                              "attribution": campaign["attribution"], "current": campaign["current"],
                              "previous": campaign["previous"], "limits": snapshot["limits"],
+                             "configuration": configuration(campaign),
                              "goals": campaign.get("diagnostics", {}).get("goals", {})}}
         # Never store a proposal whose exact action would be hidden by Telegram's limit.
         card({"id": "0" * 12, "revision": 999999, "state": "uncertain", "body": body})

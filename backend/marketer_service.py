@@ -12,6 +12,8 @@ from marketer.runner import Runner
 from marketer.products import replacement_candidates
 from marketer.store import Conflict, Store
 from marketer.telegram import Telegram, card, detail_response
+from marketer.memory import read_memory, read_experiment
+from marketer.assortment import review as assortment_review, baseline_time
 
 
 ROOT = Path(__file__).resolve().parent
@@ -80,6 +82,14 @@ def serve():
                     result = runner.context_page(store.setting("latest_snapshot"), params.get("batch"))
                 elif self.path == "/proposal":
                     result = store.get(params["id"])
+                elif self.path == "/memory":
+                    result = read_memory(store, params.get("campaign_id", 0), params.get("page", 1))
+                elif self.path == "/experiment":
+                    result = read_experiment(store, params["id"])
+                elif self.path == "/assortment":
+                    snapshot = store.setting("latest_snapshot") or {}
+                    previous = store.setting("last_analyzed_snapshot") or {}
+                    result = assortment_review(store, snapshot.get("campaigns", []), baseline_time(previous))
                 elif self.path == "/products/catalog":
                     result = actions.products.catalog(params["feed_url"])
                 elif self.path == "/products/feeds":

@@ -15,6 +15,8 @@
   "model_context_max_bytes": 70000,
   "model_request_max_bytes": 100000,
   "analyst_wait_seconds": 660,
+  "experiment_min_clicks": 100,
+  "experiment_min_conversions": 10,
   "min_run_interval_days": 7,
   "schedule_timezone": "Europe/Podgorica",
   "report_timezone": "Europe/Moscow",

@@ -49,6 +49,15 @@ class Store:
                     output TEXT, error TEXT, updated REAL NOT NULL,
                     PRIMARY KEY(run_id, step_id)
                 );
+                CREATE TABLE IF NOT EXISTS experiment_observations (
+                    proposal_id TEXT PRIMARY KEY, data TEXT NOT NULL, updated REAL NOT NULL,
+                    notification TEXT NOT NULL DEFAULT 'pending'
+                );
+                CREATE TABLE IF NOT EXISTS catalog_snapshots (
+                    id INTEGER PRIMARY KEY, url TEXT NOT NULL, fingerprint TEXT NOT NULL,
+                    first_seen REAL NOT NULL, last_seen REAL NOT NULL, body TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS catalog_history ON catalog_snapshots(url,first_seen);
             """)
 
     @contextlib.contextmanager
@@ -80,7 +89,7 @@ class Store:
         fingerprint = digest({"campaign_id": body["campaign_id"], "action": body["action"]})
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
-            old = db.execute("SELECT * FROM proposals WHERE fingerprint=? AND updated>? ORDER BY created DESC LIMIT 1",
+            old = db.execute("SELECT * FROM proposals WHERE fingerprint=? AND (updated>? OR state IN ('pending','deferred','accepted_manual','applying','uncertain')) ORDER BY created DESC LIMIT 1",
                              (fingerprint, now - 90 * 86400)).fetchone()
             if old is not None and old["state"] not in ("expired", "stale", "failed"):
                 return self.unpack(old), False
@@ -199,7 +208,7 @@ class Store:
 
     def claim_analysis_step(self, run_id, step_id):
         with self.db() as db:
-            return db.execute("UPDATE analysis_steps SET status='submitted',updated=? WHERE run_id=? AND step_id=? AND status='planned'",
+            return db.execute("UPDATE analysis_steps SET status='submitted',error=NULL,updated=? WHERE run_id=? AND step_id=? AND status IN ('planned','not_dispatched')",
                               (time.time(), run_id, step_id)).rowcount == 1
 
     def step_status(self, run_id):
@@ -246,3 +255,36 @@ class Store:
             row = self.get(pid)
             self.event(db, row, "evaluation", "analyst", data)
             db.execute("UPDATE proposals SET evaluated_at=? WHERE id=?", (time.time(), pid))
+
+    def proposal_events(self, pid, limit=30):
+        with self.db() as db:
+            return [{**dict(r), "data": json.loads(r["data"])} for r in db.execute(
+                "SELECT * FROM events WHERE proposal_id=? ORDER BY seq DESC LIMIT ?", (pid, limit))]
+
+    def observation(self, pid):
+        with self.db() as db:
+            row = db.execute("SELECT * FROM experiment_observations WHERE proposal_id=?", (pid,)).fetchone()
+            return {**dict(row), "data": json.loads(row["data"])} if row else None
+
+    def observe(self, pid, data, final=False):
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = self.unpack(db.execute("SELECT * FROM proposals WHERE id=?", (pid,)).fetchone())
+            old = db.execute("SELECT data,notification FROM experiment_observations WHERE proposal_id=?", (pid,)).fetchone()
+            if old and old[0] == encode(data):
+                return False
+            notification = old["notification"] if old and json.loads(old["data"]).get("status") == data.get("status") else "pending"
+            db.execute("INSERT INTO experiment_observations VALUES(?,?,?,?) ON CONFLICT(proposal_id) DO UPDATE SET data=excluded.data,updated=excluded.updated,notification=excluded.notification",
+                       (pid, encode(data), time.time(), notification))
+            self.event(db, row, "experiment_observation", "analyst", data)
+            if final:
+                db.execute("UPDATE proposals SET evaluated_at=? WHERE id=?", (time.time(), pid))
+            return True
+
+    def claim_observation_notice(self, pid):
+        with self.db() as db:
+            return db.execute("UPDATE experiment_observations SET notification='uncertain' WHERE proposal_id=? AND notification='pending'", (pid,)).rowcount == 1
+
+    def observation_notice_sent(self, pid):
+        with self.db() as db:
+            db.execute("UPDATE experiment_observations SET notification='sent' WHERE proposal_id=?", (pid,))

@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 from marketer.actions import Actions
 from marketer.data import DataSource, sufficient, totals
 from marketer.diagnostics import campaign_diagnostics
+from marketer.experiments import Experiments
 from marketer.runner import AREAS, Runner, sample_rows
 from marketer.schedule import weekly_slot
 from marketer.store import Store
@@ -275,7 +276,7 @@ class MultiGoalTests(unittest.TestCase):
         store = Mock()
         store.list.return_value = []
         store.setting.return_value = None
-        context = Runner(store, Mock(), Mock(), Mock(), POLICY).context(data)
+        context = Runner(store, Mock(), Mock(), Mock(), POLICY).context(data, decisions={"items": [], "counts": {}})
         self.assertNotIn("daily", context["snapshot"]["campaigns"][0])
         self.assertNotIn("period_reports", context["snapshot"]["campaigns"][0])
         self.assertIn("8", context["snapshot"]["campaigns"][0]["diagnostics"]["goals"])
@@ -292,15 +293,18 @@ class MultiGoalTests(unittest.TestCase):
         data = snapshot()
         evidence = {"goal_id": 7, "strategy_goals": [7, 8], "attribution": "AUTO", "current": data["campaigns"][0]["current"]}
         row = {"id": "test", "state": "applied", "applied_at": 1, "evaluated_at": None, "result": {},
-               "body": {"campaign_id": 1, "title": "Test", "evaluate_after_days": 28, "evidence": evidence}}
+               "body": {"campaign_id": 1, "title": "Test", "evaluate_after_days": 28, "evidence": evidence, "action": {"kind": "advisory"}}}
         store, source, telegram = Mock(), Mock(), Mock()
-        store.list.return_value = [row]
+        source.campaign.return_value = data["campaigns"][0]
         source.report.return_value = [{"Clicks": 10, "Impressions": 100, "Cost": 100, "Conversions": 5, "conversions_by_goal": {"7": 5, "8": 8}}]
-        Runner(store, source, Mock(), telegram, POLICY).evaluations()
+        engine = Experiments(store, source, telegram, {**POLICY, "goal_id": 7})
+        with patch.object(engine, "other_changes", return_value=[]):
+            result, _ = engine.assess(row, {"before_from": "2026-07-01", "before_to": "2026-07-28",
+                                          "date_from": "2026-07-30", "date_to": "2026-08-26", "days": 28})
         args = source.report.call_args.args
         self.assertEqual(args[4], ["CampaignId"])
         self.assertEqual(args[7], [7, 8])
-        self.assertEqual(store.evaluate.call_args.args[1]["after"]["GoalTotals"]["8"]["confirmed_sum"], 8)
+        self.assertEqual(result["after"]["GoalTotals"]["8"]["confirmed_sum"], 8)
 
     def test_only_transient_read_error_is_retried(self):
         direct = Mock()

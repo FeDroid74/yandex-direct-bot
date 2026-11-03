@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from marketer.actions import Actions
-from marketer.analyst import Analyst, AnalystUnavailable
+from marketer.analyst import Analyst, AnalystUnavailable, NotDispatched
 from marketer.data import DataSource
 from marketer.errors import ReadError, safe_error
 from marketer.runner import Runner
@@ -28,6 +28,49 @@ class RecoveryTests(unittest.TestCase):
         self.telegram = Mock()
         self.actions = Actions(self.source, self.store, POLICY)
         self.runner = Runner(self.store, self.source, self.actions, self.telegram, POLICY)
+
+    def test_connect_failure_before_rpc_is_distinct_from_lost_acknowledgement(self):
+        analyst = Analyst(self.store, POLICY)
+        for stderr, expected in [("gateway connect failed: Error: gateway closed (1000):\n", NotDispatched),
+                                 ("gateway connect failed: Error: gateway not connected\n", NotDispatched),
+                                 ("Gateway call failed: Error: gateway closed (1000):\n", AnalystUnavailable)]:
+            completed = Mock(returncode=1, stdout="", stderr=stderr)
+            with patch("marketer.analyst.subprocess.run", return_value=completed):
+                with self.assertRaises(expected) as error:
+                    analyst.rpc("agent", {})
+            self.assertIs(type(error.exception), expected)
+
+    def test_only_known_unsubmitted_connection_is_retried_with_same_id(self):
+        analyst = Analyst(self.store, POLICY)
+        analyst.rpc = Mock(side_effect=[NotDispatched("connect"), {"payloads": [{"text": '{"ok":true}'}]}])
+        with patch("marketer.analyst.time.sleep"):
+            self.assertEqual(analyst.call("r", "b", {}, "p", lambda x:x), {"ok": True})
+        calls = analyst.rpc.call_args_list
+        self.assertEqual([c.args[0] for c in calls], ["agent", "agent"])
+        self.assertEqual(calls[0].args[1]["idempotencyKey"], calls[1].args[1]["idempotencyKey"])
+
+    def test_exhausted_preconnect_failure_does_not_wait_for_nonexistent_model(self):
+        analyst = Analyst(self.store, POLICY)
+        analyst.rpc = Mock(side_effect=NotDispatched("connect"))
+        with patch("marketer.analyst.time.sleep"), self.assertRaises(NotDispatched):
+            analyst.call("r", "b", {}, "p", lambda x:x)
+        self.assertEqual(analyst.rpc.call_count, 3)
+        self.assertEqual(self.store.get_analysis_step("r", "b")["status"], "not_dispatched")
+
+    def test_saved_preconnect_error_reconciles_empty_session_before_submission(self):
+        step = self.store.analysis_step("r", "b", "p\nДАННЫЕ:\n{}", POLICY["analyst_agent"])
+        self.store.step_update("r", "b", "uncertain", error="OpenClaw agent:\ngateway connect failed: Error: gateway closed (1000):\n")
+        analyst = Analyst(self.store, POLICY)
+        analyst.rpc = Mock(side_effect=[{"messages": []}, {"payloads": [{"text": '{"ok":true}'}]}])
+        analyst.call("r", "b", {}, "p", lambda x:x)
+        self.assertEqual([c.args[0] for c in analyst.rpc.call_args_list], ["chat.history", "agent"])
+        self.assertEqual(analyst.rpc.call_args_list[1].args[1]["idempotencyKey"], step["request_id"])
+
+    def test_new_dispatch_does_not_inherit_old_preconnect_error(self):
+        self.store.analysis_step("r", "b", "message", POLICY["analyst_agent"])
+        self.store.step_update("r", "b", "not_dispatched", error="old preconnect failure")
+        self.assertTrue(self.store.claim_analysis_step("r", "b"))
+        self.assertIsNone(self.store.get_analysis_step("r", "b")["error"])
 
     def test_large_account_is_split_without_losing_campaigns_or_raw_data(self):
         data = snapshot()

@@ -2,16 +2,17 @@ import copy
 import json
 import time
 import uuid
-from datetime import datetime, timedelta
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
-from marketer.data import sufficient, totals
+from marketer.data import sufficient
 from marketer.store import digest
 from marketer.schedule import weekly_slot
 from marketer.products import replacement_candidates
 from marketer.analyst import Analyst
 from marketer.errors import safe_error
+from marketer.memory import memory_context
+from marketer.experiments import Experiments
+from marketer.assortment import review as assortment_review, baseline_time
 
 
 AREAS = {"economics", "search", "rsya", "creative", "landing", "assortment", "experiment", "measurement"}
@@ -41,7 +42,7 @@ class Runner:
             self.telegram.notify(message)
             self.store.set_setting("notification:" + kind, signature)
 
-    def context(self, snapshot, bounded=True):
+    def context(self, snapshot, bounded=True, decisions=None):
         if not snapshot:
             return {"snapshot": None, "history": []}
         compact = copy.deepcopy(snapshot)
@@ -76,12 +77,17 @@ class Runner:
                 if key in c:
                     c[key]["total_rows"] = len(c[key]["rows"])
                     c[key]["rows"] = [{k: v for k, v in r.items() if k != "dimension_key"} for r in c[key]["rows"][:8]]
-        history = [{"id": r["id"], "state": r["state"], "title": r["body"]["title"],
-                    "campaign_id": r["body"]["campaign_id"], "action": r["body"]["action"]} for r in self.store.list(40)
-                   if r["body"]["campaign_id"] in {c["Id"] for c in compact["campaigns"]}]
+        campaign_ids = {c["Id"] for c in compact["campaigns"]}
+        memory = decisions if decisions is not None else memory_context(self.store, sorted(campaign_ids))
+        history = [r for r in memory["items"] if r["campaign_id"] in campaign_ids]
+        total = sum(memory["counts"].get(cid, 0) for cid in campaign_ids)
+        if isinstance(compact.get("assortment"), dict):
+            compact["assortment"]["campaign_selections"] = [s for s in compact["assortment"].get("campaign_selections", []) if s["campaign_id"] in campaign_ids]
         compact["model_input_sampled"] = True
         for _ in range(5):
-            result = {"snapshot": compact, "history": history,
+            result = {"snapshot": compact, "history": history, "decision_memory": {"total": total, "sampled": len(history) < total,
+                                                                                 "full_history_tool": "marketer_memory", "paid_orders_available": False,
+                                                                                 "shared_measurement_tasks": memory.get("shared_measurement_tasks", [])},
                       "product_replacement_review": replacement_candidates(snapshot),
                       "product_catalog": self.store.setting("product_catalog_last")}
             if not bounded or self.context_size(result) <= self.policy.get("model_context_max_bytes", 70000):
@@ -101,14 +107,15 @@ class Runner:
     def contexts(self, snapshot):
         batches, campaigns = [], []
         limit = self.policy.get("model_context_max_bytes", 70000)
+        decisions = memory_context(self.store, [c["Id"] for c in snapshot["campaigns"]])
         for campaign in snapshot["campaigns"]:
-            trial = self.context({**snapshot, "campaigns": campaigns + [campaign]}, bounded=False)
+            trial = self.context({**snapshot, "campaigns": campaigns + [campaign]}, bounded=False, decisions=decisions)
             if campaigns and self.context_size(trial) > limit:
-                batches.append(self.context({**snapshot, "campaigns": campaigns}))
+                batches.append(self.context({**snapshot, "campaigns": campaigns}, decisions=decisions))
                 campaigns = []
             campaigns.append(campaign)
         if campaigns:
-            batches.append(self.context({**snapshot, "campaigns": campaigns}))
+            batches.append(self.context({**snapshot, "campaigns": campaigns}, decisions=decisions))
         for index, batch in enumerate(batches):
             batch["scope"] = {"batch": index + 1, "batches": len(batches), "account_campaign_count": len(snapshot["campaigns"]),
                               "campaign_ids": [c["Id"] for c in batch["snapshot"]["campaigns"]]}
@@ -210,46 +217,7 @@ class Runner:
         return result
 
     def evaluations(self):
-        for row in self.store.list(500):
-            if row["state"] != "applied" or row["evaluated_at"] or row["result"].get("already_present"):
-                continue
-            if row["body"]["evidence"].get("product_workflow") and row["body"]["action"]["kind"] != "product_launch":
-                self.store.evaluate(row["id"], {"operational_only": True, "result": row["result"],
-                                               "conclusion": "Настройка не является оценкой продаж; пилот оценивается после запуска."})
-                continue
-            due = row["applied_at"] + (row["body"]["evaluate_after_days"]+self.policy["conversion_lag_days"])*86400
-            if time.time() < due:
-                continue
-            e = row["body"]["evidence"]
-            report_timezone = ZoneInfo(self.policy.get("report_timezone", "Europe/Moscow"))
-            start = datetime.fromtimestamp(row["applied_at"], report_timezone).date() + timedelta(days=1)
-            end = datetime.now(report_timezone).date() - timedelta(days=self.policy["conversion_lag_days"]+1)
-            if e.get("product_workflow"):
-                cid = row["body"]["campaign_id"]
-                campaign = self.source.campaign(cid)
-                attribution = campaign.get("UnifiedCampaign", {}).get("AttributionModel", "AUTO")
-                rows = self.source.report(cid, start.isoformat(), end.isoformat(), "CAMPAIGN_PERFORMANCE_REPORT",
-                                          ["CampaignId"], e["goal_id"], attribution, [e["goal_id"]])
-                after = totals(rows, [e["goal_id"]])
-                count = f"{after['Conversions']:g}" if after["ConversionsComplete"] else "неизвестно, часть данных недоступна"
-                data = {"after": after, "date_from": start.isoformat(), "date_to": end.isoformat(), "attribution": attribution,
-                        "conclusion": "Ecommerce-покупки не подтверждают оплату. Это наблюдение после запуска, не доказательство прироста относительно старой кампании."}
-                self.telegram.notify(f"Товарный пилот {cid}, оценка #{row['id']} ({start} — {end}).\n"
-                                     f"Клики: {after['Clicks']:g}; расход: {after['Cost']:g} руб.; покупки (целевые визиты Директа): {count}.\n" + data["conclusion"])
-                self.store.evaluate(row["id"], data)
-                continue
-            rows = self.source.report(row["body"]["campaign_id"], start.isoformat(), end.isoformat(),
-                                      "CAMPAIGN_PERFORMANCE_REPORT", ["CampaignId"], e["goal_id"], e["attribution"], e.get("strategy_goals"))
-            after = totals(rows, e.get("strategy_goals", []))
-            if (after["Conversions"] < 5 or not after["ConversionsComplete"]) and time.time() < row["applied_at"]+90*86400:
-                continue
-            data = {"before": e["current"], "after": after, "date_from": start.isoformat(), "date_to": end.isoformat(),
-                    "conclusion": "Наблюдение по кампании, не доказательство причинного эффекта. Учтите другие изменения и разную длину периодов."}
-            self.telegram.notify(f"Оценка #{row['id']}: {row['body']['title']}\n"
-                                 f"До: CPA {e['current']['CPA']}, конверсий {e['current']['Conversions']:g}.\n"
-                                 f"После ({start} — {end}): CPA {after['CPA']}, конверсий {after['Conversions']:g}.\n"
-                                 + data["conclusion"] + ("\nВыборка недостаточна или неполна; итог не определён." if after["Conversions"] < 5 or not after["ConversionsComplete"] else ""))
-            self.store.evaluate(row["id"], data)
+        Experiments(self.store, self.source, self.telegram, self.policy).run()
 
     def run(self, force=False, collect_only=False, scheduled=False, resume_run_id=None, publish=True):
         last = self.store.setting("last_attempt", 0)
@@ -293,7 +261,14 @@ class Runner:
                 else:
                     if publish and (inspected["invalid_count"] or inspected["unavailable"]):
                         self.notify_once("product_feed_invalid", "Товарная выгрузка требует проверки: в ней есть некорректные или отсутствующие товары. Проверьте настройки остатков и исключения товаров в InSales. Кампании автоматически не изменялись.")
-            allowed, reason = sufficient(snapshot, self.store.setting("last_analyzed_snapshot"), self.policy)
+            previous_snapshot = self.store.setting("last_analyzed_snapshot")
+            if not resume_run_id:
+                snapshot["assortment"] = assortment_review(self.store, snapshot["campaigns"], baseline_time(previous_snapshot))
+                self.store.set_setting("latest_snapshot", snapshot)
+            allowed, reason = sufficient(snapshot, previous_snapshot, self.policy)
+            changes = (snapshot.get("assortment") or {}).get("changes") or {}
+            if reason == "insufficient_new_data" and any(change.get("count", 0) for change in changes.values()):
+                allowed, reason = True, "observed_assortment_changed"
             if resume_run_id and data.get("gate_allowed"):
                 allowed, reason = True, data.get("gate", "resuming_saved_analysis")
             if slot in self.policy.get("required_review_slots", []) and sufficient(snapshot, None, self.policy)[0]:

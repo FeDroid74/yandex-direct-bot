@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from marketer.catalog import assortment_summary, catalog_summary, fetch_catalog, money, select_offers, shop_url
 from marketer.data import checked
 from marketer.store import Conflict, digest, encode
+from marketer.assortment import record_catalog
 
 
 PURCHASE_GOAL = 352606262
@@ -125,6 +126,10 @@ class Products:
 
     def catalog(self, url):
         result = self.fetcher(shop_url(url))
+        previous = self.store.setting("product_catalog:" + digest(url))
+        if previous:
+            record_catalog(self.store, previous)
+        record_catalog(self.store, result)
         self.store.set_setting("product_catalog:" + digest(url), result)
         self.store.set_setting("product_catalog_last", assortment_summary(result))
         return catalog_summary(result)
