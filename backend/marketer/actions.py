@@ -8,6 +8,8 @@ from marketer.store import Conflict
 from marketer.products import KINDS, Products
 from marketer.telegram import card
 from marketer.experiments import configuration
+from marketer.billing import require_purchase_billing
+from marketer.knowledge import Knowledge
 
 
 AREAS = {"economics", "search", "rsya", "creative", "landing", "assortment", "experiment", "measurement"}
@@ -58,6 +60,8 @@ class Actions:
             raise ValueError("Unknown marketing area")
         action = copy.deepcopy(raw["action"])
         kind = action.get("kind")
+        if self.policy.get("enforce_purchase_only") and kind != "advisory":
+            require_purchase_billing(campaign)
         if snapshot.get("schema_version", 1) >= 2 and kind in ("add_negative", "strategy_value"):
             diagnosis = campaign.get("diagnostics", {})
             if not diagnosis.get("counter_linked") or not diagnosis.get("goals") or any(g.get("present") is not True for g in diagnosis["goals"].values()):
@@ -133,6 +137,14 @@ class Actions:
                              "previous": campaign["previous"], "limits": snapshot["limits"],
                              "configuration": configuration(campaign),
                              "goals": campaign.get("diagnostics", {}).get("goals", {})}}
+        refs = raw.get("knowledge_refs", [])
+        if not isinstance(refs, list) or len(refs) > 4 or any(not isinstance(ref, str) for ref in refs):
+            raise ValueError("Invalid knowledge references")
+        if refs:
+            allowed = {e["id"] for e in (snapshot.get("knowledge") or {}).get("excerpts", [])}
+            if not set(refs).issubset(allowed):
+                raise ValueError("Course references must come from this analysis snapshot")
+            body["knowledge_sources"] = [{k: v for k, v in Knowledge(self.store).get(ref).items() if k != "text"} for ref in dict.fromkeys(refs)]
         # Never store a proposal whose exact action would be hidden by Telegram's limit.
         card({"id": "0" * 12, "revision": 999999, "state": "uncertain", "body": body})
         return body
@@ -143,6 +155,8 @@ class Actions:
         kind = action["kind"]
         if kind in KINDS:
             return self.products.execute(row)
+        if self.policy.get("enforce_purchase_only"):
+            require_purchase_billing(self.source.campaign(cid))
         direct = self.source.direct
         # Fetch fresh state, merge only the approved field, then re-read to verify.
         if kind == "add_negative":

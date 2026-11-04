@@ -17,6 +17,7 @@ from services.search_terms_analyzer import analyze_search_terms, build_negative_
 
 
 POLICY = json.loads((Path(__file__).parents[1]/"marketer/policy.json").read_text())
+POLICY = {**POLICY, "enforce_purchase_only": False, "autonomy": {"enabled": False}}
 
 
 def snapshot():

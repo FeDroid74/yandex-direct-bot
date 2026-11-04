@@ -1,0 +1,19 @@
+[Unit]
+Description=Private course transcription, bounded resource use
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/appuser/.openclaw/workspace/yandex-direct-bot
+ExecStart=/home/appuser/.local/share/yandex-course-runtime/bin/python backend/course_worker.py
+Environment=PYTHONUNBUFFERED=1
+Environment=OMP_NUM_THREADS=1
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=MKL_NUM_THREADS=1
+Nice=15
+CPUQuota=50%
+MemoryMax=900M
+TasksMax=32
+UMask=0077
+NoNewPrivileges=true
+Restart=no

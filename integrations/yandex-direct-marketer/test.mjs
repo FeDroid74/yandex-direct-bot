@@ -43,7 +43,18 @@ try {
   assert.equal(lastBody.decision, "approve");
   assert.equal(lastBody.page, undefined);
   assert.equal(calls, 3);
-  assert.equal(registered.length, 17);
+  globalThis.fetch = async (url, options) => {
+    calls++;
+    assert.equal(url, "http://127.0.0.1:8092/autonomy/control");
+    assert.equal(options.headers.Authorization, "Bearer decision-test");
+    assert.deepEqual(JSON.parse(options.body), { action: "pause", sender_id: "42", channel: "telegram" });
+    return { ok: true, json: async () => ({ text: "Paused" }) };
+  };
+  await command.handler({ ...ctx, args: "auto pause", senderId: "43" });
+  assert.equal(calls, 3);
+  assert.deepEqual(await command.handler({ ...ctx, args: "auto pause" }), { text: "Paused" });
+  assert.equal(calls, 4);
+  assert.equal(registered.length, 19);
   assert.ok(registered.every((tool) => !/approve|execute|apply/.test(tool.name)));
   globalThis.fetch = async (url, options) => {
     assert.equal(url, "http://127.0.0.1:8092/context");
@@ -56,6 +67,8 @@ try {
     ["marketer_memory", "/memory", { campaign_id: 0, page: 1 }],
     ["marketer_experiment", "/experiment", { id: "abcdef123456" }],
     ["marketer_assortment", "/assortment", {}],
+    ["marketer_knowledge_status", "/knowledge/status", {}],
+    ["marketer_knowledge_search", "/knowledge/search", { query: "purchase" }],
   ]) {
     globalThis.fetch = async (url, options) => {
       assert.equal(url, `http://127.0.0.1:8092${path}`);

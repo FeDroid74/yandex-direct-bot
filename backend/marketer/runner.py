@@ -13,6 +13,9 @@ from marketer.errors import safe_error
 from marketer.memory import memory_context
 from marketer.experiments import Experiments
 from marketer.assortment import review as assortment_review, baseline_time
+from marketer.knowledge import Knowledge
+from marketer.autonomy import Autonomy
+from marketer.telegram import summary, action_text
 
 
 AREAS = {"economics", "search", "rsya", "creative", "landing", "assortment", "experiment", "measurement"}
@@ -264,6 +267,7 @@ class Runner:
             previous_snapshot = self.store.setting("last_analyzed_snapshot")
             if not resume_run_id:
                 snapshot["assortment"] = assortment_review(self.store, snapshot["campaigns"], baseline_time(previous_snapshot))
+                snapshot["knowledge"] = Knowledge(self.store).context(snapshot["campaigns"])
                 self.store.set_setting("latest_snapshot", snapshot)
             allowed, reason = sufficient(snapshot, previous_snapshot, self.policy)
             changes = (snapshot.get("assortment") or {}).get("changes") or {}
@@ -307,6 +311,8 @@ class Runner:
             for body in prepared:
                 row, fresh = self.store.create(body)
                 if fresh or row["body"]["evidence"].get("run_id") == run_id:
+                    if self.policy.get("autonomy", {}).get("enabled"):
+                        row = Autonomy(self.store, self.source, self.actions, self.policy).process(row, snapshot)
                     if row["delivery"] == "pending":
                         self.telegram.publish(row, self.store)
                         row = self.store.get(row["id"])
@@ -323,13 +329,45 @@ class Runner:
             self.store.save_run(run_id, "complete", {"snapshot": snapshot, "summary": analysis.get("summary"), "coverage": analysis.get("coverage"),
                                                      "published": published, "rejected": rejected, "model_called": True,
                                                      "stage": "finished", "completed_at": time.time(), "error": None})
+            if self.policy.get("autonomy", {}).get("enabled"):
+                self.completion_notice(run_id, snapshot, analysis, published)
             return {"status": "complete", "run_id": run_id, "published": published, "rejected": rejected}
         except Exception as exc:
             error = safe_error(exc)
             self.store.save_run(run_id, "failed", {"error": error, "stage": stage})
             if publish:
                 try:
-                    self.notify_once("run_error", "Автономный анализ не завершён. Кампании не менялись. Прогресс сохранён.\n" + error)
+                    self.notify_once("run_error", "Автономный анализ не завершён. Прогресс и результаты операций сохранены. Перед повтором требуется сверка; выполненные действия не повторяются автоматически.\n" + error)
                 except Exception as notification_error:
                     self.store.save_run(run_id, "failed", {"notification_error": safe_error(notification_error)})
             raise
+
+    def completion_notice(self, run_id, snapshot, analysis, published):
+        key = "completion_notice:"+run_id
+        if self.store.setting(key):
+            return
+        rows = [self.store.get(pid) for pid in published]
+        applied = [r for r in rows if r["state"] == "applied" and (r.get("result") or {}).get("authorization", {}).get("mode") == "autonomous"]
+        pending = [r for r in rows if r["state"] == "pending"]
+        uncertain = [r for r in rows if r["state"] == "uncertain"]
+        parts = [f"Анализ {snapshot['current_from']} — {snapshot['date_to']}: {len(snapshot['campaigns'])} кампаний."]
+        if applied:
+            parts.append("Автоматически применено и проверено:\n"+"\n".join(
+                f"• {summary(r['body']['campaign_name'], 150)}: {summary(action_text(r['body']), 450)}" for r in applied))
+        elif uncertain:
+            parts.append("Подтверждённых автоматических изменений нет; результат попытки требуется сверить.")
+        else:
+            parts.append("Автоматических изменений нет: подходящих проверенных действий не было.")
+        if pending:
+            parts.append(f"На отдельное решение оставлено: {len(pending)}. Карточки отправлены отдельно.")
+        if uncertain:
+            parts.append("Есть операция с неизвестным результатом. Автозаписи остановлены до сверки; повтора не будет.")
+        parts.append(summary(analysis.get("summary", ""), 1500))
+        parts.append("Автоматический режим не меняет цель покупки и способ оплаты. Достижение цели не подтверждает оплату заказа.")
+        message = summary("\n\n".join(parts), 3900)
+        self.store.set_setting(key, {"delivery": "uncertain", "at": time.time()})
+        try:
+            sent = self.telegram.notify(message)
+            self.store.set_setting(key, {"delivery": "sent", "message_id": (sent or {}).get("message_id"), "at": time.time()})
+        except Exception as exc:
+            self.store.set_setting(key, {"delivery": "uncertain", "error": safe_error(exc), "at": time.time()})

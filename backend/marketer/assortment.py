@@ -1,6 +1,8 @@
 """Observed feed history. Inventory changes must never be called sales."""
 import json
 import time
+import re
+from urllib.parse import urlsplit, unquote
 from datetime import datetime
 from decimal import Decimal
 
@@ -97,6 +99,28 @@ def review(store, campaigns=(), baseline_at=None, now=None):
                                  max_price_rub=str(max(prices)) if prices else None,
                                  category_ids=sorted({o["category_id"] for o in offers})[:30],
                                  sample=[{k: o[k] for k in ("id", "name", "price", "url")} for o in available[:2]])
+                selection["composition"] = composition(available)
+                by_path = {}
+                for offer in offers:
+                    by_path.setdefault(unquote(urlsplit(offer["url"]).path).rstrip("/"), []).append(offer)
+                landing_matches = []
+                for row in (campaign.get("landing_pages") or {}).get("rows", [])[:8]:
+                    path = unquote(urlsplit(row.get("label", "")).path).rstrip("/")
+                    matching = by_path.get(path, [])
+                    landing_matches.append({"path": path, "visits": row.get("visits"), "current_filter_match": bool(matching),
+                                            "offers": [{"id": o["id"], "name": o["name"]} for o in matching[:3]]})
+                selection["landing_matches"] = landing_matches
+                selection["composition_limits"] = "Name-based types, not relevance judgements. Matching uses current feed, not historical inventory; no purchase or exclusion is inferred."
             result["campaign_selections"].append(selection)
     result["campaign_selections_total"] = selection_count
     return result
+
+
+def composition(offers):
+    groups = {"figurine_named": [], "tableware_named": [], "other_or_unknown": []}
+    for offer in offers:
+        name = offer["name"].casefold()
+        kind = ("figurine_named" if "статуэт" in name else "tableware_named" if
+                re.search(r"тарелк|сервиз|чайн|кофейн|кувшин|ваз[ао]|соусник|штоф|специ", name) else "other_or_unknown")
+        groups[kind].append(offer)
+    return {key: {"count": len(items), "samples": [{"id": o["id"], "name": o["name"]} for o in items[:3]]} for key, items in groups.items()}

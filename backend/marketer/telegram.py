@@ -123,6 +123,8 @@ def card(row):
         required.append("Результат: " + "; ".join(
             f"{label}: {result[key]}" for key, label in (("campaign_id", "кампания"), ("feed_id", "фид"), ("state", "состояние"), ("processing_status", "обработка фида")) if key in result))
     optional = [f"{label}: {summary(value, maximum)}" for label, value, maximum in explanation(b)]
+    if (row.get("result") or {}).get("authorization", {}).get("mode") == "autonomous":
+        required.append("Автоматическое действие по разрешённой политике владельца. Это не нажатие кнопки одобрения.")
     if (row.get("result") or {}).get("error"):
         optional.append("Результат: " + summary(row["result"]["error"], 400))
     footer = "Полное обоснование и ограничения — в «Подробнее»."
@@ -153,6 +155,9 @@ def detail_pages(row):
             for g in plan["groups"]))
     if b.get("before"):
         parts.append("Исходные параметры:\n" + json.dumps(b["before"], ensure_ascii=False, indent=2))
+    if b.get("knowledge_sources"):
+        parts.append("Использованные материалы курса (не доказательство результата):\n" + "\n".join(
+            f"{s['course']} / {s['lesson']} / {s['locator']}\n{s.get('url', '')}" for s in b["knowledge_sources"]))
     if (row.get("result") or {}).get("error"):
         parts.append("Результат: " + row["result"]["error"])
     pages = split_text("\n\n".join(parts), 4000 - telegram_length(header(row)) - 80)

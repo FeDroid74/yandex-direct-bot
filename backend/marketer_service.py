@@ -14,6 +14,8 @@ from marketer.store import Conflict, Store
 from marketer.telegram import Telegram, card, detail_response
 from marketer.memory import read_memory, read_experiment
 from marketer.assortment import review as assortment_review, baseline_time
+from marketer.knowledge import Knowledge
+from marketer.autonomy import Autonomy
 
 
 ROOT = Path(__file__).resolve().parent
@@ -52,12 +54,14 @@ def serve():
 
         def do_GET(self):
             if self.path == "/health":
-                self.reply(200, {"ok": True, "service": "marketer", "approval_required": True})
+                enabled = Autonomy(store, runner.source, actions, runner.policy).status()["enabled"]
+                self.reply(200, {"ok": True, "service": "marketer", "approval_required": not enabled,
+                                 "bounded_autonomy": enabled, "financial_and_launch_approval_required": True})
             else:
                 self.reply(404, {"error": "not_found"})
 
         def do_POST(self):
-            decision = self.path == "/decision"
+            decision = self.path in ("/decision", "/autonomy/control")
             expected = config["decision_key"] if decision else config["api_key"]
             token = self.headers.get("Authorization", "").removeprefix("Bearer ")
             if not hmac.compare_digest(token, expected):
@@ -77,7 +81,22 @@ def serve():
                              "gate": r["data"].get("gate"), "updated_at": r["data"].get("updated_at")} for r in store.runs()]
                     result = {"runs": runs, "policy": runner.policy, "analyst_auth": store.setting("analyst_auth", {"status": "not_checked"}),
                               "analysis_health": store.analysis_health(), "running": run_lock.locked(),
+                              "autonomy": Autonomy(store, runner.source, actions, runner.policy).status(),
+                              "knowledge": Knowledge(store).status(),
                               "proposals": [{"id": r["id"], "revision": r["revision"], "state": r["state"], "title": r["body"]["title"]} for r in store.list(50)]}
+                elif self.path == "/knowledge/status":
+                    result = Knowledge(store).status()
+                elif self.path == "/knowledge/search":
+                    result = {"excerpts": Knowledge(store).search(params["query"])}
+                elif self.path == "/autonomy/control":
+                    if str(params.get("sender_id")) != str(config["owner_id"]) or params.get("channel") != "telegram":
+                        raise PermissionError("Only the Telegram owner may control autonomy")
+                    if params.get("action") not in ("pause", "resume", "status"):
+                        raise ValueError("Unknown autonomy control")
+                    if params["action"] != "status":
+                        store.set_setting("autonomy_paused", params["action"] == "pause")
+                    result = Autonomy(store, runner.source, actions, runner.policy).status()
+                    result["text"] = ("Автоматические изменения включены: только минус-фразы и тексты, оплата только за покупку. Бюджеты, CPA и запуск требуют вашего решения." if result["enabled"] else "Автоматические изменения приостановлены. Аналитика продолжит работать.")
                 elif self.path == "/context":
                     result = runner.context_page(store.setting("latest_snapshot"), params.get("batch"))
                 elif self.path == "/proposal":

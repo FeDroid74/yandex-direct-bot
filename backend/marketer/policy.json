@@ -1,5 +1,11 @@
 {
   "counter_id": 99041859,
+  "enforce_purchase_only": true,
+  "autonomy": {
+    "enabled": true,
+    "policy_id": "owner-2026-11-05-bounded-v1",
+    "authorized_after": 1793834848
+  },
   "goal_id": 352606262,
   "campaign_ids": [],
   "lookback_days": 28,
