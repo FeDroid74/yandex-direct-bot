@@ -1,5 +1,6 @@
 """Read accessible course pages and enqueue real videos; never complete assignments."""
 import argparse
+import hashlib
 import http.cookiejar
 import json
 import os
@@ -98,8 +99,11 @@ def discover(store, cookie_file, bootstrap=None):
     if len(lessons) > 300:
         raise ValueError("Course exceeds maximum lesson count")
     init_queue(store)
+    generation = time.time()
     for url, fallback in lessons.items():
         soup = get(url)
+        if not soup.select(".gc-user-logined"):
+            raise ValueError("Course session expired during discovery")
         title_node = soup.select_one("h2") or soup.select_one("title")
         title = title_node.get_text(" ", strip=True)[:200] if title_node else fallback[:200]
         blocks = soup.select(".lite-page")
@@ -114,12 +118,16 @@ def discover(store, cookie_file, bootstrap=None):
                     native += 1
         info = {"youtube_ids": sorted(vids), "native_players": native, "readable_lesson": bool(blocks),
                 "status": "queued" if vids else "native_media_required" if native else "no_video_found"}
+        players = [e["data-iframe-src"] for e in soup.select(".lite-page [data-iframe-src]")]
+        info["native_signature"] = hashlib.sha256(encode(players).encode()).hexdigest()
+        info["generation"] = generation
         with store.db() as db:
             db.execute("INSERT INTO course_lessons VALUES(?,?,?,?) ON CONFLICT(url) DO UPDATE SET title=excluded.title,data=excluded.data,checked=excluded.checked", (url, title, encode(info), time.time()))
             for vid in vids:
                 db.execute("INSERT OR IGNORE INTO course_videos VALUES(?,?,?,'pending',NULL,NULL,?)", (vid, url, title, time.time()))
         time.sleep(.5)
-    store.set_setting("course_discovery", {"root": ROOT, "streams": len(visited), "accessible_lessons": len(lessons), "locked_lesson_labels": sorted(locked), "checked_at": time.time(),
+    jar.save(ignore_discard=True)
+    store.set_setting("course_discovery", {"root": ROOT, "generation": generation, "streams": len(visited), "accessible_lessons": len(lessons), "locked_lesson_labels": sorted(locked), "checked_at": time.time(),
                                           "limits": "Only linked accessible lessons. No homework submitted, no locked lessons bypassed. A queued video is not an imported transcript."})
     return status(store)
 
@@ -182,7 +190,21 @@ def main():
     parser.add_argument("--transcript", type=Path)
     a = parser.parse_args()
     store = Store(a.db)
-    if a.action == "discover": result = discover(store, a.cookies, os.environ.get("COURSE_BOOTSTRAP_URL"))
+    if a.action == "discover":
+        try:
+            result = discover(store, a.cookies, os.environ.get("COURSE_BOOTSTRAP_URL"))
+        except Exception as exc:
+            # Keep the last good catalog. Do not misreport a stale import as a successful refresh.
+            cause = "authentication_required" if "session expired" in str(exc).lower() else "discovery_failed"
+            prior = store.setting("course_worker", {})
+            store.set_setting("course_worker", {"status": cause, "at": time.time(), "error_type": type(exc).__name__})
+            if prior.get("status") != cause:
+                from marketer.telegram import Telegram
+                conf = json.loads((Path.home()/".config/yandex-direct-bot/marketer.json").read_text())
+                oc = json.loads(Path(conf["openclaw_config"]).read_text())
+                text = "Для обновления курса нужен повторный вход в GetCourse." if cause == "authentication_required" else "Не удалось обновить каталог GetCourse; следующая попытка по расписанию."
+                Telegram(oc["channels"]["telegram"]["botToken"], conf["owner_id"]).notify(text+" Ранее импортированные материалы сохранены.")
+            raise
     elif a.action == "captions": result = process_captions(store)
     elif a.action == "import":
         from knowledge_import import sections_from_text

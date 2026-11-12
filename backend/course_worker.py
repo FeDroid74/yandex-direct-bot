@@ -72,18 +72,28 @@ def playlist(url, depth=0):
 
 def run(store, private_dir):
     init_queue(store)
+    generation = store.setting("course_discovery", {}).get("generation")
     with store.db() as db:
         db.execute("CREATE TABLE IF NOT EXISTS course_native (lesson_url TEXT PRIMARY KEY,status TEXT NOT NULL,data TEXT NOT NULL,updated REAL NOT NULL)")
-        rows = db.execute("SELECT l.* FROM course_lessons l LEFT JOIN course_native n ON n.lesson_url=l.url WHERE n.status IS NULL OR n.status='processing' ORDER BY CASE WHEN l.title LIKE '%Директ%' OR l.title LIKE '%Метрик%' OR l.title LIKE '%ключев%' THEN 0 ELSE 1 END,l.url").fetchall()
+        rows = db.execute("""SELECT l.* FROM course_lessons l LEFT JOIN course_native n ON n.lesson_url=l.url
+            WHERE (? IS NULL OR json_extract(l.data,'$.generation')=?)
+            AND (n.status IS NULL OR n.status IN ('processing','authentication_required')
+                 OR json_extract(l.data,'$.native_signature') IS NOT json_extract(n.data,'$.native_signature')
+                 OR (n.status='needs_attention' AND json_extract(n.data,'$.stage') IN ('lesson','audio_download')
+                      AND n.updated < ?))
+            ORDER BY CASE WHEN l.title LIKE '%Директ%' OR l.title LIKE '%Метрик%' OR l.title LIKE '%ключев%' THEN 0 ELSE 1 END,l.url""",
+            (generation, generation, time.time()-6*86400)).fetchall()
     jar = http.cookiejar.LWPCookieJar(str(private_dir/"course-cookies.lwp"));jar.load(ignore_discard=True)
     op = urllib.request.build_opener(RestrictedRedirect(), urllib.request.HTTPCookieProcessor(jar))
     model = None
     store.set_setting("course_worker", {"status": "running", "queued_lessons": len(rows), "at": time.time(), "method": "local_speech_transcription"})
     def record(url, state, data):
+        data["native_signature"] = signature
         with store.db() as db:
             db.execute("INSERT INTO course_native VALUES(?,?,?,?) ON CONFLICT(lesson_url) DO UPDATE SET status=excluded.status,data=excluded.data,updated=excluded.updated", (url, state, encode(data), time.time()))
     for row in rows:
         url = row["url"]
+        signature = json.loads(row["data"]).get("native_signature")
         if urlsplit(url).hostname != HOST:
             continue
         record(url, "processing", {"title": row["title"]})
@@ -156,7 +166,7 @@ def run(store, private_dir):
     with store.db() as db:
         counts = dict(db.execute("SELECT status,count(*) FROM course_native GROUP BY status").fetchall())
     key = "course_completion:"+str(store.setting("course_discovery", {}).get("checked_at"))
-    if not store.setting(key):
+    if rows and not store.setting(key):
         store.set_setting(key, {"delivery": "uncertain"})
         try:
             config = json.loads((private_dir/"marketer.json").read_text())

@@ -49,6 +49,23 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual([c.args[0] for c in calls], ["agent", "agent"])
         self.assertEqual(calls[0].args[1]["idempotencyKey"], calls[1].args[1]["idempotencyKey"])
 
+    def test_failed_history_connection_does_not_prove_agent_not_dispatched(self):
+        analyst = Analyst(self.store, POLICY)
+        completed = Mock(returncode=1, stdout="", stderr="gateway connect failed: Error: gateway closed (1000):\n")
+        with patch("marketer.analyst.subprocess.run", return_value=completed), self.assertRaises(AnalystUnavailable) as err:
+            analyst.rpc("chat.history", {})
+        self.assertNotIsInstance(err.exception, NotDispatched)
+
+    def test_scheduled_read_recovery_reuses_run_and_collection(self):
+        self.runner.model = Mock(side_effect=[NotDispatched("gateway closed"), review()])
+        with patch("marketer.runner.review_slot", return_value=("2026-11-16", True, False)), patch("marketer.runner.time.sleep"):
+            result = self.runner.run(scheduled=True)
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(self.runner.model.call_args_list[0], self.runner.model.call_args_list[1])
+        self.assertEqual(len(self.store.runs()), 1)
+        self.source.collect.assert_called_once()
+        self.assertEqual(self.source.writes, 0)
+
     def test_exhausted_preconnect_failure_does_not_wait_for_nonexistent_model(self):
         analyst = Analyst(self.store, POLICY)
         analyst.rpc = Mock(side_effect=NotDispatched("connect"))

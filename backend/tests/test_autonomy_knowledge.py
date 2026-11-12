@@ -180,7 +180,8 @@ class AutonomyTests(unittest.TestCase):
             self.assertEqual(preview["status"], "preview_ready")
             self.assertEqual(self.source.writes, 0)
             self.assertEqual(self.store.list(), [])
-            live = runner.run(resume_run_id=preview["run_id"], publish=True)
+            with patch("marketer.runner.review_slot", return_value=("2026-11-12", False, True)):
+                live = runner.run(scheduled=True)
         self.assertEqual(live["status"], "complete")
         self.assertEqual(self.source.writes, 1)
         self.assertEqual(self.store.get(live["published"][0])["state"], "applied")

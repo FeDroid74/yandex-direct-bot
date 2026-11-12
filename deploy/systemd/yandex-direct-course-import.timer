@@ -1,0 +1,10 @@
+[Unit]
+Description=Discover new or updated accessible course lessons
+
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00 Europe/Podgorica
+Persistent=true
+Unit=yandex-direct-course-import.service
+
+[Install]
+WantedBy=timers.target

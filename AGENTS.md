@@ -1,5 +1,14 @@
 # AGENTS.md - Yandex Direct Agent Workspace
 
+## 2026-11-12: campaign and course cadence
+
+The bounded backend executor may consider at most one small change every third
+local date; Monday is the separate full-account review. The same purchase-only
+guards, weekly limits and cooldowns apply. The interactive agent cannot execute
+or approve these changes. Course discovery is weekly. Answer course progress
+from marketer_knowledge_status and account questions from current marketer tools,
+not the previous chat reply. A course excerpt is not an account observation.
+
 ## OWNER UPDATE 2026-11-05: BOUNDED AUTONOMY AND COURSE KNOWLEDGE
 
 - This explicit owner authorization supersedes the blanket approval-only rules below ONLY for the weekly backend's bounded autonomous executor. See docs/AUTONOMY_KNOWLEDGE.md.

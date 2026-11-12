@@ -16,6 +16,20 @@ def private_json(path, value):
     temporary.replace(path)
 
 
+def configure_chat(config):
+    # Extend the interactive agent only. The independent reviewer keeps deny=["*"].
+    agent = next(a for a in config["agents"]["list"] if a["id"] == "direct")
+    tools = agent.setdefault("tools", {})
+    names = tools.setdefault("alsoAllow", [])
+    for tool in ("marketer_knowledge_status", "marketer_knowledge_search", "marketer_status",
+                 "marketer_context", "marketer_context_batch", "marketer_proposal", "marketer_memory",
+                 "marketer_experiment", "marketer_assortment"):
+        if tool not in names:
+            names.append(tool)
+    config["channels"]["telegram"]["dmHistoryLimit"] = 16
+    config.setdefault("session", {}).setdefault("resetByChannel", {})["telegram"] = {"mode": "daily", "atHour": 4}
+
+
 def install():
     home = Path.home()
     repo = Path(__file__).resolve().parents[1]
@@ -65,6 +79,7 @@ def install():
     if not any(a.get("id") == "direct-marketer" for a in agents):
         agents.append({"id": "direct-marketer", "name": "Read-only Direct Marketer",
                        "workspace": str(repo/"integrations/analyst"), "tools": {"deny": ["*"]}})
+    configure_chat(config)
     private_json(config_path, config)
     # Same account, separate agent profile; only copy the existing authentication store.
     target = home/".openclaw/agents/direct-marketer/agent"
@@ -78,6 +93,7 @@ def install():
     unitdir.mkdir(parents=True, exist_ok=True)
     for unit in (repo/"deploy/systemd").iterdir():
         shutil.copy2(unit, unitdir/unit.name)
+    shutil.copy2(repo/"deploy/yandex-direct-course-import.service", unitdir)
     bridge = home/".npm-global/lib/node_modules/openclaw/extensions/yandex-direct-bridge"
     if bridge.is_dir():
         for name in ("index.ts", "openclaw.plugin.json"):

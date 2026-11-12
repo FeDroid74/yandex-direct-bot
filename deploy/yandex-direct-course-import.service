@@ -5,6 +5,8 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/home/appuser/.openclaw/workspace/yandex-direct-bot
+TimeoutStartSec=30min
+ExecStartPre=/home/appuser/.local/share/yandex-course-runtime/bin/python backend/course_sync.py discover
 ExecStart=/home/appuser/.local/share/yandex-course-runtime/bin/python backend/course_worker.py
 Environment=PYTHONUNBUFFERED=1
 Environment=OMP_NUM_THREADS=1

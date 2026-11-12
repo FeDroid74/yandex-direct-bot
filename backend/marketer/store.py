@@ -250,6 +250,17 @@ class Store:
             return db.execute("INSERT OR IGNORE INTO settings VALUES(?,?)",
                               ("scheduled_slot:" + slot, encode({"started": time.time()}))).rowcount == 1
 
+    def claim_reviews(self, latest, monday, light):
+        """Claim the latest weekly review and light slot in a single transaction."""
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            def claim(day):
+                return db.execute("INSERT OR IGNORE INTO settings VALUES(?,?)",
+                                  ("scheduled_slot:" + day, encode({"started": time.time()}))).rowcount == 1
+            weekly = claim(monday)
+            optimize = light and (weekly if latest == monday else claim(latest))
+            return weekly, optimize
+
     def evaluate(self, pid, data):
         with self.db() as db:
             row = self.get(pid)

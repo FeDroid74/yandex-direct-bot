@@ -2,13 +2,15 @@ import copy
 import json
 import time
 import uuid
+from datetime import date, timedelta
 from pathlib import Path
 
-from marketer.data import sufficient
-from marketer.store import digest
-from marketer.schedule import weekly_slot
+from marketer.data import sufficient, totals
+from marketer.store import Conflict, digest
+from marketer.schedule import review_slot, weekly_slot
+from marketer.billing import require_purchase_billing, PURCHASE_GOAL
 from marketer.products import replacement_candidates
-from marketer.analyst import Analyst
+from marketer.analyst import Analyst, AnalystUnavailable, NotDispatched
 from marketer.errors import safe_error
 from marketer.memory import memory_context
 from marketer.experiments import Experiments
@@ -19,6 +21,54 @@ from marketer.telegram import summary, action_text
 
 
 AREAS = {"economics", "search", "rsya", "creative", "landing", "assortment", "experiment", "measurement"}
+
+
+def light_candidates(campaigns):
+    result = []
+    for c in campaigns:
+        try:
+            require_purchase_billing(c)
+        except Conflict:
+            continue
+        if c.get("State") != "ON" or c.get("metrika_errors"):
+            continue
+        negatives, clicks = {}, {}
+        for r in c.get("queries", []):
+            key = (r.get("AdGroupId"), (r.get("Query") or "").casefold())
+            if len(key[1].split()) >= 2 and r.get("conversions_by_goal", {}).get("352606262") == 0:
+                negatives[key] = negatives.get(key, 0) + r.get("Clicks", 0)
+        for r in c.get("ad_performance", []):
+            key = str(r.get("AdId"))
+            clicks[key] = clicks.get(key, 0) + r.get("Clicks", 0)
+        if any(n >= 30 for n in negatives.values()) or any(
+            a.get("TextAd") and a.get("State") == "ON" and a.get("Status") == "ACCEPTED"
+            and clicks.get(str(a["Id"]), 0) >= 30 for a in c.get("ads", [])
+        ):
+            result.append(c)
+    return result
+
+
+def weekly_traffic(snapshot):
+    end = date.fromisoformat(snapshot["date_to"])
+    start, prior = end - timedelta(days=6), end - timedelta(days=13)
+    facts = []
+    for c in snapshot["campaigns"]:
+        daily = c.get("daily", [])
+        def stats(lo, hi):
+            rows = [r for r in daily if lo <= r["Date"] <= hi]
+            return totals(rows, [PURCHASE_GOAL])
+        before = stats(prior.isoformat(), (start-timedelta(days=1)).isoformat())
+        after = stats(start.isoformat(), end.isoformat())
+        if before["Rows"] or after["Rows"]:
+            def label(period):
+                if not period["Rows"]:
+                    return "нет строк"
+                g = period["GoalTotals"][str(PURCHASE_GOAL)]
+                buys = f"{g['confirmed_sum']:g}" if g["complete"] else "неизвестно"
+                return f"{period['Clicks']:g} кл., {period['Cost']:.0f} руб., покупок: {buys}"
+            facts.append((after["Clicks"]+before["Clicks"], f"{summary(c['Name'], 70)}: {label(before)} → {label(after)}"))
+    prefix = f"Директ: {prior:%d.%m}–{start-timedelta(days=1):%d.%m} → {start:%d.%m}–{end:%d.%m}. Цель покупки, атрибуция каждой кампании."
+    return prefix + "\n" + ("\n".join(line for _, line in sorted(facts, reverse=True)[:3]) or "По этим датам нет строк в собранных отчётах.")
 
 
 def sample_rows(rows, limit=12):
@@ -148,6 +198,8 @@ class Runner:
         if not plan:
             raise ValueError("No complete campaigns to analyze")
         prompt = Path(__file__).with_name("analyst_prompt.txt").read_text(encoding="utf-8")
+        if snapshot.get("review_kind") == "light":
+            prompt += "\nКороткий проход: предложи только одну обоснованную минус-фразу или правку TextAd, либо пустой список. Не предлагай другие действия."
         analyst = Analyst(self.store, self.policy)
         results = []
         for index, context in enumerate(plan):
@@ -224,13 +276,16 @@ class Runner:
 
     def run(self, force=False, collect_only=False, scheduled=False, resume_run_id=None, publish=True):
         last = self.store.setting("last_attempt", 0)
-        slot = weekly_slot(time.time(), self.policy.get("schedule_timezone", "Europe/Podgorica")) if scheduled else None
+        slot, weekly, optimize = review_slot(time.time(), self.policy.get("schedule_timezone", "Europe/Podgorica")) if scheduled else (None, False, False)
         if scheduled and (force or collect_only or resume_run_id or not publish):
             raise ValueError("Scheduled analysis cannot be forced or collection-only")
         if resume_run_id and (force or collect_only):
             raise ValueError("Resume cannot be combined with force or collection-only")
-        if scheduled and not self.store.claim_schedule(slot):
-            return {"status": "already_scheduled", "schedule_slot": slot}
+        if scheduled:
+            monday = slot if weekly else weekly_slot(time.time(), self.policy.get("schedule_timezone", "Europe/Podgorica"))
+            weekly, optimize = self.store.claim_reviews(slot, monday, optimize)
+            if not (weekly or optimize):
+                return {"status": "already_scheduled", "schedule_slot": slot}
         if not resume_run_id and not scheduled and not force and time.time()-last < self.policy["min_run_interval_days"]*86400 - 300:
             return {"status": "not_due"}
         if resume_run_id:
@@ -250,6 +305,10 @@ class Runner:
             snapshot["run_id"] = run_id
             if not resume_run_id:
                 snapshot["schedule_slot"] = slot
+                snapshot["review_kind"] = ("weekly" if weekly else "light") if scheduled else "manual"
+                snapshot["optimization_due"] = optimize
+            weekly = snapshot.get("review_kind") == "weekly"
+            light = snapshot.get("review_kind") == "light"
             self.store.set_setting("latest_snapshot", snapshot)
             self.store.save_run(run_id, "collected", {"snapshot": snapshot, "stage": "data_gate"})
             catalog = self.store.setting("product_catalog_last")
@@ -264,7 +323,7 @@ class Runner:
                 else:
                     if publish and (inspected["invalid_count"] or inspected["unavailable"]):
                         self.notify_once("product_feed_invalid", "Товарная выгрузка требует проверки: в ней есть некорректные или отсутствующие товары. Проверьте настройки остатков и исключения товаров в InSales. Кампании автоматически не изменялись.")
-            previous_snapshot = self.store.setting("last_analyzed_snapshot")
+            previous_snapshot = self.store.setting("last_light_snapshot" if light else "last_analyzed_snapshot")
             if not resume_run_id:
                 snapshot["assortment"] = assortment_review(self.store, snapshot["campaigns"], baseline_time(previous_snapshot))
                 snapshot["knowledge"] = Knowledge(self.store).context(snapshot["campaigns"])
@@ -277,10 +336,16 @@ class Runner:
                 allowed, reason = True, data.get("gate", "resuming_saved_analysis")
             if slot in self.policy.get("required_review_slots", []) and sufficient(snapshot, None, self.policy)[0]:
                 allowed, reason = True, "owner_requested_calendar_review"
+            model_snapshot = snapshot
+            if light:
+                candidates = light_candidates(snapshot["campaigns"])
+                if not candidates:
+                    allowed, reason = False, "no_eligible_small_change"
+                model_snapshot = {**snapshot, "campaigns": candidates}
             self.store.save_run(run_id, "collected", {"snapshot": snapshot, "gate": reason, "gate_allowed": allowed})
             if publish and snapshot["errors"]:
                 self.notify_once("data_errors", "Анализ Директа: часть данных недоступна. Для этих кампаний решения не формируются.\n" + json.dumps(snapshot["errors"], ensure_ascii=False)[:2500])
-            if not collect_only and publish and not data.get("evaluations_checked"):
+            if not light and not collect_only and publish and not data.get("evaluations_checked"):
                 try:
                     self.evaluations()
                     self.store.save_run(run_id, "collected", {"evaluations_checked": True})
@@ -290,13 +355,30 @@ class Runner:
             if not allowed or collect_only:
                 status = "collected_only" if collect_only else "skipped"
                 self.store.save_run(run_id, status, {"snapshot": snapshot, "gate": reason, "model_called": False, "stage": "finished"})
+                if weekly and publish:
+                    self.completion_notice(run_id, snapshot, {"summary": "Недостаточно новых зрелых данных для обоснованного изменения."}, [])
                 return {"status": status, "gate": reason, "run_id": run_id, "campaigns": len(snapshot["campaigns"]), "errors": snapshot["errors"]}
             stage = "analysis"
             self.store.save_run(run_id, "analyzing", {"stage": stage, "model_called": True})
-            analysis = data.get("analysis") or self.model(snapshot)
+            analysis = data.get("analysis")
+            if analysis is None:
+                try:
+                    analysis = self.model(model_snapshot)
+                except AnalystUnavailable as exc:
+                    # Retry only a scheduled read phase. Analyst reuses frozen inputs,
+                    # completed outputs and request IDs. Uncertain dispatch is observation-only.
+                    transport = isinstance(exc, NotDispatched) or any(
+                        text in str(exc).lower() for text in ("gateway closed", "gateway not connected", "timeoutexpired"))
+                    if not scheduled or not transport:
+                        raise
+                    self.store.save_run(run_id, "analyzing", {"read_recovery_at": time.time()})
+                    time.sleep(20)
+                    analysis = self.model(model_snapshot)
             self.store.save_run(run_id, "analyzing", {"analysis": analysis, "summary": analysis.get("summary"), "coverage": analysis.get("coverage")})
             published, rejected, prepared = list(data.get("published", [])), [], []
             for raw in analysis["proposals"]:
+                if light and (prepared or raw["action"]["kind"] not in ("ad_text", "add_negative")):
+                    continue
                 try:
                     body = self.actions.prepare(raw, snapshot)
                     prepared.append(body)
@@ -308,10 +390,11 @@ class Runner:
             stage = "publication"
             self.store.save_run(run_id, "publishing", {"stage": stage, "rejected": rejected})
             delivery_issues = []
+            automatic = next((b for b in prepared if b["action"]["kind"] in ("add_negative", "ad_text")), None)
             for body in prepared:
                 row, fresh = self.store.create(body)
                 if fresh or row["body"]["evidence"].get("run_id") == run_id:
-                    if self.policy.get("autonomy", {}).get("enabled"):
+                    if self.policy.get("autonomy", {}).get("enabled") and snapshot.get("optimization_due") and body is automatic:
                         row = Autonomy(self.store, self.source, self.actions, self.policy).process(row, snapshot)
                     if row["delivery"] == "pending":
                         self.telegram.publish(row, self.store)
@@ -325,11 +408,11 @@ class Runner:
             if delivery_issues:
                 self.store.save_run(run_id, "delivery_uncertain", {"stage": stage, "delivery_issues": delivery_issues})
                 return {"status": "delivery_uncertain", "run_id": run_id, "published": published, "delivery_issues": delivery_issues}
-            self.store.set_setting("last_analyzed_snapshot", snapshot)
+            self.store.set_setting("last_light_snapshot" if light else "last_analyzed_snapshot", snapshot)
             self.store.save_run(run_id, "complete", {"snapshot": snapshot, "summary": analysis.get("summary"), "coverage": analysis.get("coverage"),
                                                      "published": published, "rejected": rejected, "model_called": True,
                                                      "stage": "finished", "completed_at": time.time(), "error": None})
-            if self.policy.get("autonomy", {}).get("enabled"):
+            if self.policy.get("autonomy", {}).get("enabled") and (not light or published):
                 self.completion_notice(run_id, snapshot, analysis, published)
             return {"status": "complete", "run_id": run_id, "published": published, "rejected": rejected}
         except Exception as exc:
@@ -351,6 +434,11 @@ class Runner:
         pending = [r for r in rows if r["state"] == "pending"]
         uncertain = [r for r in rows if r["state"] == "uncertain"]
         parts = [f"Анализ {snapshot['current_from']} — {snapshot['date_to']}: {len(snapshot['campaigns'])} кампаний."]
+        if snapshot.get("review_kind") == "weekly":
+            with self.store.db() as db:
+                changed = db.execute("SELECT count(*) FROM proposals WHERE applied_at>=? AND state='applied' AND json_extract(result,'$.authorization.mode')='autonomous'", (time.time()-7*86400,)).fetchone()[0]
+            parts.append(f"За последние 7 дней подтверждено автоматических правок: {changed}. Сравнение недель не доказывает эффект правки.")
+            parts.append(weekly_traffic(snapshot))
         if applied:
             parts.append("Автоматически применено и проверено:\n"+"\n".join(
                 f"• {summary(r['body']['campaign_name'], 150)}: {summary(action_text(r['body']), 450)}" for r in applied))

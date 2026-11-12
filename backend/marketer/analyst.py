@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import subprocess
 import time
@@ -63,13 +64,14 @@ class Analyst:
             completed = subprocess.run(
                 [self.policy["openclaw_command"], "gateway", "call", method, "--params",
                  json.dumps(params, ensure_ascii=False), "--timeout", str((timeout - 5) * 1000), "--json"],
-                capture_output=True, text=True, timeout=timeout)
+                capture_output=True, text=True, timeout=timeout,
+                env={**os.environ, "YD_GATEWAY_LOCAL_RPC": "1"})
         except (subprocess.TimeoutExpired, OSError) as exc:
             raise AnalystUnavailable(safe_error(f"OpenClaw {method}: {type(exc).__name__}")) from exc
         if completed.returncode:
             raw_error = getattr(completed, "stderr", "")
             error = safe_error(raw_error)
-            if connection_failed_before_dispatch(raw_error) and not any(key in completed.stdout for key in ('"runId"', '"payloads"')):
+            if method == "agent" and connection_failed_before_dispatch(raw_error) and not any(key in completed.stdout for key in ('"runId"', '"payloads"')):
                 raise NotDispatched("OpenClaw agent connection failed before RPC dispatch: " + error[-1000:])
             if "OAuth token refresh failed" in raw_error:
                 self.store.set_setting("analyst_auth", {"status": "reauthentication_required", "checked_at": time.time()})
@@ -97,7 +99,8 @@ class Analyst:
             raise AnalystUnavailable("Stored analyst answer is invalid; inspect step " + step_id)
         answer = None
         try:
-            if step["status"] in ("submitted", "uncertain") and connection_failed_before_dispatch(step.get("error")):
+            if (step["status"] in ("submitted", "uncertain") and
+                    str(step.get("error")).startswith("OpenClaw agent:") and connection_failed_before_dispatch(step.get("error"))):
                 history = self.read_rpc("chat.history", {"sessionKey": step["session_key"], "limit": 10})
                 if history.get("messages") == []:
                     self.store.step_update(run_id, step_id, "not_dispatched", error=step["error"])
@@ -155,7 +158,7 @@ class Analyst:
         except Exception as exc:
             current = self.store.get_analysis_step(run_id, step_id)
             if current["status"] not in ("invalid", "not_dispatched"):
-                self.store.step_update(run_id, step_id, "uncertain", error=safe_error(exc))
+                self.store.step_update(run_id, step_id, "uncertain", error="Observation failed: " + safe_error(exc))
             auth = self.store.setting("analyst_auth", {})
             if auth.get("status") != "reauthentication_required":
                 self.store.set_setting("analyst_auth", {"status": "unavailable", "checked_at": time.time(), "error": safe_error(exc)})

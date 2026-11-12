@@ -6,7 +6,8 @@ the analyst to execute shell writes.
 
 ## Advertising changes
 
-Only new weekly `add_negative` and existing TextAd `ad_text` proposals are eligible.
+From 2026-11-12, only a scheduled optimization slot may submit a new
+`add_negative` or existing TextAd `ad_text` proposal to the executor.
 Previously sent, revised, deferred, accepted or rejected cards are not converted
 to automatic approvals. Interactive `/propose` remains an approval-card route.
 
@@ -33,7 +34,13 @@ uncertainty pause automation, never replay. Maximum three claims per rolling
 seven days, and a 28-day campaign cooldown after applied changes.
 
 `/yd auto pause|resume|status` is a native owner-only Telegram command. Pausing
-does not undo an already dispatched operation. Existing Monday schedule remains.
+does not undo an already dispatched operation. At 12:00 Europe/Podgorica a
+calendar check claims at most one slot: every third local date from 2026-11-12
+for at most one small change, and Mondays for account-wide analytics. On overlap
+one snapshot serves both purposes. Off-days do not collect statistics or call a
+model. The two review modes have separate data baselines. A light pass with no
+eligible evidence stays quiet; a weekly report includes the verified change count
+even when no new evidence warrants a model. A manual analysis is not an auto slot.
 Completed analyses send a short summary and separate action details. Notification
 uncertainty is recorded and not automatically resent. No automatic rollback.
 
@@ -62,7 +69,21 @@ passwords are never written into the repository.
 It refuses protected/encrypted media, validates HTTPS CDN hosts and public IPs,
 downloads only temporary audio, transcribes using local faster-whisper base/int8,
 imports source-labelled excerpts and discards temporary audio. No paid ASR API.
-The systemd worker is a one-shot queue consumer, not another advertising timer.
+The course timer starts this worker on Sundays at 04:00 Europe/Podgorica,
+after rediscovering currently accessible lessons. It uses player signatures and
+private transcript checkpoints, not a fresh transcription of every video.
+
+## Telegram recovery (OpenClaw 2026.3.13)
+
+Back up the direct session index, transcript, configuration and marketer DB
+before maintenance. Keep the original transcript; detach only the diagnosed
+overgrown owner DM while the gateway is stopped. Configure Telegram DM history
+limit 16 and daily context renewal at 04:00 gateway-local. Course storage and
+experiment history are separate. `deploy/openclaw_reply_guard.py ROOT BACKUP`
+syntax-checks and backs up supported runtime bundles before replacement. On
+compaction timeout the reply is an explicit error, never an old assistant text.
+The gateway allows 15 seconds for a non-forwarded loopback handshake; auth,
+network binding and permissions are unchanged. Recheck before upgrading OpenClaw.
 CPUQuota=50%, MemoryMax=900M, one CPU thread, low priority. Audio is transcribed
 in 3-minute memory-bounded chunks with source timestamps. It can take a long time.
 System ffmpeg is required. Python dependencies are pinned separately; PyAV 16.1.0
