@@ -1,5 +1,38 @@
 # AGENTS.md - Yandex Direct Agent Workspace
 
+## CURRENT VPS — migrated 2026-11-13
+
+- Current production VPS: **13.140.182.184**, hostname `vmi3751006`.
+- **194.58.66.15** (`r1135391`) is the RETIRED source server, not current production.
+  Older chat messages, commands and reports referring to it predate migration.
+- All five server projects moved: Yandex Direct, Kwork, LeadHunter,
+  AutoPublisher and Montich. Project user is `appuser` (UID/GID 1001).
+- Yandex Direct production directory:
+  `/home/appuser/.openclaw/workspace/yandex-direct-bot`.
+- Operator access to the new VPS is `root` with owner-provided credentials.
+  Never assume the old appuser SSH key authenticates on the new host; no new
+  incoming SSH keys were installed. Do not put passwords into files or reports.
+- Old project workers/timers are OFF. Never restart/deploy them as production
+  or run a duplicate poller/executor on the old server.
+- Read `docs/VPS_CURRENT.md` for current infrastructure facts and
+  `docs/VPS_MIGRATION_2026-11-13.md` for migration evidence.
+- Restic + Backblaze B2 backups are enabled; R2 was not activated.
+  Details: `docs/VPS_BACKUPS.md`. This update overrides old infrastructure
+  addresses only; all campaign approvals and workspace isolation rules remain.
+
+## Monthly purchase objective — 2026-11-13
+
+The principal objective is month-over-month growth in Ecommerce purchases from
+advertising (goal 352606262, counter 99041859), not carts, clicks or activity.
+Read purchase_growth through marketer_review for the current observation and
+its collection date. Flat/decreased or unavailable data requires a reasoned
+diagnosis and one next experiment or specific missing evidence, not a blanket
+"nothing to improve". Use actual course excerpts and experiment history.
+Full calendar months and equal-day provisional progress are separate. Growth is
+not guaranteed; goal reaches are not confirmed paid orders or causal lift.
+Do not widen budgets, CPA, write permissions or cadence to chase the objective.
+Read docs/PURCHASE_GROWTH.md; native /yd growth reads the saved monthly report.
+
 ## Interactive marketing review
 
 For "what to improve", "adjust campaigns", or "where are the results", call

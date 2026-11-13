@@ -6,7 +6,7 @@ import math
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from marketer.diagnostics import campaign_diagnostics
@@ -29,6 +29,12 @@ def checked(body):
     if not isinstance(body, dict) or body.get("error") or not isinstance(body.get("result"), dict):
         raise YandexDirectClientError("Direct API error: " + json.dumps(body, ensure_ascii=False)[:1200])
     return body["result"]
+
+
+def campaign_filter(ids):
+    if not ids or len(ids) > 500 or any(type(i) is not int or i <= 0 for i in ids):
+        raise ValueError("Invalid account campaign scope")
+    return "(" + " OR ".join(f"ym:s:lastsignDirectClickOrder=='{i}'" for i in sorted(set(ids))) + ")"
 
 
 class DataSource:
@@ -153,13 +159,13 @@ class DataSource:
             return rows
         raise ValueError("Report not ready")
 
-    def metrika_report(self, cid, start, end, goal_id, dimension=None, extra_goals=None, _batch_size=7):
+    def metrika_report(self, cid, start, end, goal_id, dimension=None, extra_goals=None, _batch_size=7, campaign_ids=None):
         goals = list(dict.fromkeys([goal_id] + list(extra_goals or [])))
         if len(goals) > _batch_size:
             combined = None
             for offset in range(0, len(goals), _batch_size):
                 batch = goals[offset:offset+_batch_size]
-                part = self.metrika_report(cid, start, end, batch[0], dimension, batch[1:])
+                part = self.metrika_report(cid, start, end, batch[0], dimension, batch[1:], campaign_ids=campaign_ids)
                 if combined is None:
                     combined = part
                     continue
@@ -183,6 +189,10 @@ class DataSource:
             params["dimensions"] = dimension
         if cid is not None:
             params["filters"] = f"ym:s:lastsignDirectClickOrder=='{cid}'"
+        if campaign_ids is not None:
+            if cid is not None:
+                raise ValueError("Invalid account campaign scope")
+            params["filters"] = campaign_filter(campaign_ids)
 
         def parsed(values):
             if len(values) != len(metrics) or any(number(v) is None or number(v) < 0 for v in values):
@@ -202,7 +212,7 @@ class DataSource:
                     e.get("error_type") == "query_error" and str(e.get("message", "")).startswith("Запрос слишком сложный")
                     for e in exc.payload.get("errors", []) if isinstance(e, dict))
                 if len(goals) > 1 and complex_query:
-                    return self.metrika_report(cid, start, end, goal_id, dimension, goals[1:], _batch_size=1)
+                    return self.metrika_report(cid, start, end, goal_id, dimension, goals[1:], _batch_size=1, campaign_ids=campaign_ids)
                 raise
             if result.get("sampled") or result.get("total_rows_rounded"):
                 raise ValueError("Metrika returned sampled/rounded data")
@@ -223,11 +233,41 @@ class DataSource:
             if len(rows) >= int(result["total_rows"]):
                 if len(rows) != int(result["total_rows"]) or len({r["dimension_key"] for r in rows}) != len(rows):
                     raise ValueError("Duplicate or inconsistent Metrika rows")
-                return {"rows": rows, "totals": total_metrics, "attribution": "lastsign" if cid is not None else "all_traffic",
+                return {"rows": rows, "totals": total_metrics, "attribution": "lastsign" if cid is not None or campaign_ids is not None else "all_traffic",
                         "dimension": dimension, "sampled": False, "date_from": start, "date_to": end}
             if not page:
                 raise ValueError("Incomplete Metrika pagination")
         raise ValueError("Metrika pagination limit reached")
+
+    def purchase_report(self, start, end, goal_id, campaign_ids=None):
+        """One additive goal metric; split complex requests without sampling."""
+        lo, hi = date.fromisoformat(start), date.fromisoformat(end)
+        if lo > hi or (hi-lo).days > 31:
+            raise ValueError("Purchase partition must fit one calendar month")
+        params = {"ids": str(self.policy["counter_id"]), "date1": start, "date2": end,
+                  "metrics": f"ym:s:goal{int(goal_id)}reaches", "accuracy": "full", "limit": 1}
+        if campaign_ids is not None:
+            params["filters"] = campaign_filter(campaign_ids)
+        try:
+            result = self.metrika._get_json("/stat/v1/data", params)
+        except YandexMetrikaClientError as exc:
+            complex_query = exc.status == 400 and any(e.get("error_type") == "query_error" and
+                str(e.get("message", "")).startswith("Запрос слишком сложный") for e in exc.payload.get("errors", []) if isinstance(e, dict))
+            if not complex_query or lo == hi:
+                raise
+            mid = lo + (hi-lo)//2
+            parts = [self.purchase_report(a.isoformat(), b.isoformat(), goal_id, campaign_ids)
+                     for a, b in ((lo, mid), (mid+timedelta(days=1), hi))]
+            values = [p["totals"]["goals"][str(goal_id)]["reaches"] for p in parts]
+            return {"sampled": False, "totals": {"goals": {str(goal_id): {"reaches": sum(values)}}},
+                    "partitions": [w for p in parts for w in p["partitions"]]}
+        if result.get("sampled") is not False or result.get("total_rows_rounded"):
+            raise ValueError("Purchase report is sampled or unconfirmed")
+        values = result.get("totals", [])
+        if len(values) != 1 or number(values[0]) is None or number(values[0]) < 0:
+            raise ValueError("Purchase total is unknown, not zero")
+        return {"sampled": False, "totals": {"goals": {str(goal_id): {"reaches": number(values[0])}}},
+                "partitions": [{"from": start, "to": end}]}
 
     def collect(self, today=None):
         today = today or datetime.now(ZoneInfo(self.policy.get("report_timezone", "Europe/Moscow"))).date()

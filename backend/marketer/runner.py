@@ -18,6 +18,7 @@ from marketer.assortment import review as assortment_review, baseline_time
 from marketer.knowledge import Knowledge
 from marketer.autonomy import Autonomy
 from marketer.opportunities import review as opportunity_review
+from marketer.growth import Growth, OBJECTIVE, notice as growth_notice, assessment_text
 from marketer.telegram import summary, action_text
 
 
@@ -138,8 +139,10 @@ class Runner:
         if isinstance(compact.get("assortment"), dict):
             compact["assortment"]["campaign_selections"] = [s for s in compact["assortment"].get("campaign_selections", []) if s["campaign_id"] in campaign_ids]
         compact["model_input_sampled"] = True
+        observed = opportunity_review({**snapshot, "run_id": snapshot.get("run_id", "")})["opportunities"]
         for _ in range(5):
-            result = {"snapshot": compact, "history": history, "decision_memory": {"total": total, "sampled": len(history) < total,
+            result = {"objective": OBJECTIVE, "observed_opportunities": observed,
+                      "snapshot": compact, "history": history, "decision_memory": {"total": total, "sampled": len(history) < total,
                                                                                  "full_history_tool": "marketer_memory", "paid_orders_available": False,
                                                                                  "shared_measurement_tasks": memory.get("shared_measurement_tasks", [])},
                       "product_replacement_review": replacement_candidates(snapshot),
@@ -207,6 +210,7 @@ class Runner:
             scope = set(context["scope"]["campaign_ids"])
             def validate(result, scope=scope):
                 self.validate_review(result)
+                self.validate_growth(result, snapshot)
                 if any(p.get("campaign_id") not in scope for p in result["proposals"]):
                     raise ValueError("Proposal references a campaign outside its analysis batch")
                 return result
@@ -235,19 +239,37 @@ class Runner:
                                                  "current": {k: c["current"].get(k) for k in
                                                              ("Clicks", "Cost", "Conversions", "ConversionsComplete", "CPA")}}
                                                 for c in snapshot["campaigns"]],
-                           "reviews": [{"summary": p.get("summary"), "coverage": p["coverage"]} for p in parts],
+                           "objective": OBJECTIVE, "purchase_growth": snapshot.get("purchase_growth"),
+                           "reviews": [{"summary": p.get("summary"), "coverage": p["coverage"], "growth_review": p.get("growth_review")} for p in parts],
                            "candidates": [{"id": k, **v} for k, v in candidates.items()]}
                 def select(result, candidates=candidates):
                     ids = result.get("selected_ids") if isinstance(result, dict) else None
                     if not isinstance(ids, list) or any(not isinstance(k, str) or k not in candidates for k in ids) or len(ids) != len(set(ids)):
                         raise ValueError("Invalid portfolio selection; actions cannot be invented")
                     self.validate_review({**result, "proposals": [candidates[k] for k in ids]})
+                    self.validate_growth(result, snapshot)
                     return result
                 choice = analyst.call(run_id, f"merge-{level:02d}-{offset:03d}", context, merge_prompt, select)
                 merged.append({"summary": choice.get("summary"), "coverage": choice["coverage"],
-                               "proposals": [candidates[k] for k in choice["selected_ids"]]})
+                               "growth_review": choice.get("growth_review"), "proposals": [candidates[k] for k in choice["selected_ids"]]})
             results, level = merged, level + 1
         return results[0]
+
+    @staticmethod
+    def validate_growth(result, snapshot):
+        if not snapshot.get("purchase_growth") or snapshot.get("review_kind") == "light":
+            return
+        g = result.get("growth_review")
+        expected = snapshot["purchase_growth"]["comparison"]["status"]
+        if not isinstance(g, dict) or g.get("status") != expected:
+            raise ValueError("Monthly purchase comparison must match the observed source")
+        for key, limit in (("diagnosis", 1600), ("next_step", 700)):
+            if not isinstance(g.get(key), str) or not 10 <= len(g[key].strip()) <= limit:
+                raise ValueError("Monthly review requires a bounded diagnosis and next step")
+        refs = g.get("knowledge_refs", [])
+        allowed = {e["id"] for e in snapshot.get("knowledge", {}).get("excerpts", [])}
+        if not isinstance(refs, list) or len(refs) > 4 or any(not isinstance(k, str) or k not in allowed for k in refs):
+            raise ValueError("Monthly course references must come from this snapshot")
 
     def validate_review(self, result):
         if not isinstance(result, dict) or not isinstance(result.get("proposals"), list):
@@ -312,7 +334,7 @@ class Runner:
         key = "requested_review_notice:" + run["id"]
         self.store.set_setting(key, {"delivery":"uncertain"})
         try:
-            sent = self.telegram.notify(message[:3900])
+            sent = self.telegram.notify(summary(message, 3800) + "\n\nПолный разбор: /yd review")
         except Exception:
             return
         self.store.set_setting(key, {"delivery":"sent", "message_id": (sent or {}).get("message_id")})
@@ -369,12 +391,23 @@ class Runner:
             previous_snapshot = self.store.setting("last_light_snapshot" if light else "last_analyzed_snapshot")
             if not resume_run_id:
                 snapshot["assortment"] = assortment_review(self.store, snapshot["campaigns"], baseline_time(previous_snapshot))
+                if self.policy.get("monthly_purchase_objective"):
+                    if light:
+                        snapshot["purchase_growth"] = self.store.setting("purchase_growth")
+                    else:
+                        snapshot["purchase_growth"] = Growth(self.source, self.policy).collect(snapshot)
+                        self.store.set_setting("purchase_growth", snapshot["purchase_growth"])
                 snapshot["knowledge"] = Knowledge(self.store).context(snapshot["campaigns"])
                 self.store.set_setting("latest_snapshot", snapshot)
             allowed, reason = sufficient(snapshot, previous_snapshot, self.policy)
             changes = (snapshot.get("assortment") or {}).get("changes") or {}
             if reason == "insufficient_new_data" and any(change.get("count", 0) for change in changes.values()):
                 allowed, reason = True, "observed_assortment_changed"
+            growth = snapshot.get("purchase_growth") or {}
+            prior_growth = (previous_snapshot or {}).get("purchase_growth") or {}
+            if (not light and growth.get("status") == "ready" and snapshot["campaigns"]
+                and growth.get("fingerprint") != prior_growth.get("fingerprint")):
+                allowed, reason = True, "new_monthly_purchase_evidence"
             if resume_run_id and data.get("gate_allowed"):
                 allowed, reason = True, data.get("gate", "resuming_saved_analysis")
             if slot in self.policy.get("required_review_slots", []) and sufficient(snapshot, None, self.policy)[0]:
@@ -417,7 +450,10 @@ class Runner:
                     self.store.save_run(run_id, "analyzing", {"read_recovery_at": time.time()})
                     time.sleep(20)
                     analysis = self.model(model_snapshot)
-            self.store.save_run(run_id, "analyzing", {"analysis": analysis, "summary": analysis.get("summary"), "coverage": analysis.get("coverage")})
+            if analysis.get("growth_review"):
+                snapshot["purchase_growth_review"] = analysis["growth_review"]
+                self.store.set_setting("latest_snapshot", snapshot)
+            self.store.save_run(run_id, "analyzing", {"snapshot": snapshot, "analysis": analysis, "summary": analysis.get("summary"), "coverage": analysis.get("coverage")})
             published, rejected, prepared = list(data.get("published", [])), [], []
             for raw in analysis["proposals"]:
                 if light and (prepared or raw["action"]["kind"] not in ("ad_text", "add_negative")):
@@ -479,6 +515,11 @@ class Runner:
         pending = [r for r in rows if r["state"] == "pending"]
         uncertain = [r for r in rows if r["state"] == "uncertain"]
         parts = [f"Анализ {snapshot['current_from']} — {snapshot['date_to']}: {len(snapshot['campaigns'])} кампаний."]
+        if snapshot.get("review_kind") != "light":
+            parts.append(growth_notice(snapshot.get("purchase_growth")))
+            diagnosis = analysis.get("growth_review")
+            if diagnosis:
+                parts.append(assessment_text(diagnosis, snapshot.get("knowledge") or {}))
         if snapshot.get("review_kind") == "weekly":
             with self.store.db() as db:
                 changed = db.execute("SELECT count(*) FROM proposals WHERE applied_at>=? AND state='applied' AND json_extract(result,'$.authorization.mode')='autonomous'", (time.time()-7*86400,)).fetchone()[0]

@@ -17,6 +17,7 @@ from marketer.assortment import review as assortment_review, baseline_time
 from marketer.knowledge import Knowledge
 from marketer.autonomy import Autonomy
 from marketer.opportunities import review as opportunities, public_review
+from marketer.growth import OBJECTIVE
 
 
 ROOT = Path(__file__).resolve().parent
@@ -80,7 +81,7 @@ def serve():
                              "summary": r["data"].get("summary"), "model_called": r["data"].get("model_called"),
                              "stage": r["data"].get("stage"), "error": r["data"].get("error"),
                              "gate": r["data"].get("gate"), "updated_at": r["data"].get("updated_at")} for r in store.runs()]
-                    result = {"runs": runs, "policy": runner.policy, "analyst_auth": store.setting("analyst_auth", {"status": "not_checked"}),
+                    result = {"runs": runs, "policy": runner.policy, "objective": OBJECTIVE, "purchase_growth": store.setting("purchase_growth"), "analyst_auth": store.setting("analyst_auth", {"status": "not_checked"}),
                               "analysis_health": store.analysis_health(), "running": run_lock.locked(),
                               "autonomy": Autonomy(store, runner.source, actions, runner.policy).status(),
                               "knowledge": Knowledge(store).status(),

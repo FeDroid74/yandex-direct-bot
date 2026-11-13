@@ -95,6 +95,24 @@ class MemoryTests(unittest.TestCase):
         self.assertIsNone(data["after"]["CPA"])
         self.assertIsNone(self.store.get(row["id"])["evaluated_at"])
 
+    def test_shopping_copy_is_measured_and_feed_drift_is_a_confounder(self):
+        row = self.make()
+        row["body"]["action"] = {"kind": "product_ad_edit", "campaign_id": row["body"]["campaign_id"],
+                                 "ad_id": 999, "patch": {"default_text": "After"}}
+        original = {"Id": 999, "ShoppingAd": {"FeedId": 11, "FeedFilterConditions": [{"Category": 1}]}}
+        row["body"]["before"] = {"ads": [original]}
+        self.source.ad = Mock(return_value={"ShoppingAd": {**original["ShoppingAd"], "DefaultTexts": ["After"]}})
+        with self.store.db() as db:
+            db.execute("UPDATE proposals SET body=? WHERE id=?", (json.dumps(row["body"]), row["id"]))
+        self.engine.run(self.now)
+        data = self.store.observation(row["id"])["data"]
+        self.assertEqual(data["status"], "observed")
+        self.assertEqual(self.source.report.call_count, 2)
+        self.source.ad.return_value["ShoppingAd"]["FeedId"] = 12
+        result, _ = self.engine.assess(row, windows(row, self.policy, self.now))
+        self.assertEqual(result["status"], "confounded")
+        self.assertIn("shopping_feed_or_selection_changed", result["confounders"])
+
     def test_small_sample_ends_as_inconclusive_after_90_mature_days(self):
         row = self.make(days=110)
         self.source.report.return_value[0]["Conversions"] = 0

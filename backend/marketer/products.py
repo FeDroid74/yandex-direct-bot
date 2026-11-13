@@ -565,7 +565,10 @@ class Products:
         if plan:
             body["warnings"].append("Автообновляемый фид: товары, цены и наличие внутри выбранных категорий меняются по данным InSales; нейросеть их не выдумывает.")
         if kind == "product_ad_edit" and "default_text" in action["patch"]:
+            from marketer.experiments import configuration
             ad = next(a for a in before["ads"] if a["Id"] == action["ad_id"])
+            body["evidence"].update(attribution=before["campaign"].get("UnifiedCampaign", {}).get("AttributionModel", "AUTO"),
+                                    configuration=configuration(before["campaign"]))
             body.update(title="Уточнить резервный текст товарного объявления",
                         product_details=f"{label}\nОбъявление {action['ad_id']}\nБыло: «{' / '.join(ad['ShoppingAd'].get('DefaultTexts') or [])}»\nПредлагается: «{action['patch']['default_text']}»",
                         expected_effect="Проверить, помогает ли описание ассортимента привлечь релевантные переходы. Резервный текст используется не при каждом показе.",

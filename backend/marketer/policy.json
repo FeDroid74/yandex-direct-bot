@@ -1,6 +1,7 @@
 {
   "counter_id": 99041859,
   "enforce_purchase_only": true,
+  "monthly_purchase_objective": true,
   "autonomy": {
     "enabled": true,
     "policy_id": "owner-2026-11-05-bounded-v1",

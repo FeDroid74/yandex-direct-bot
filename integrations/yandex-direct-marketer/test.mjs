@@ -100,6 +100,12 @@ try {
   assert.match((await hook({prompt:"Что улучшить в кампаниях?"},hookCtx)).prependContext,/Account facts/);
   assert.equal(await hook({prompt:"Что улучшить?"},{...hookCtx,agentId:"direct-marketer"}),undefined);
   assert.equal(await hook({prompt:"Добрый день"},hookCtx),undefined);
+  globalThis.fetch = async (url, options) => {
+    assert.equal(url, "http://127.0.0.1:8092/review");
+    assert.equal(options.headers.Authorization, "Bearer read-test");
+    return {ok:true,json:async()=>({growth_text:"Monthly purchases: verified"})};
+  };
+  assert.deepEqual(await command.handler({...ctx,args:"growth"}),{text:"Monthly purchases: verified"});
   console.log("Plugin tests passed: owner validation, paged details, native Telegram buttons, no approval tool exposed.");
 } finally {
   rmSync(dir, { recursive: true });

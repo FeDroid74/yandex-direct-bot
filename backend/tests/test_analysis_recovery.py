@@ -40,6 +40,20 @@ class RecoveryTests(unittest.TestCase):
                     analyst.rpc("agent", {})
             self.assertIs(type(error.exception), expected)
 
+    def test_new_monthly_evidence_opens_read_only_analysis_gate(self):
+        self.runner.policy = {**POLICY, "monthly_purchase_objective": True}
+        self.runner.model = Mock(return_value={"summary": "Review", "coverage": {}, "proposals": [], "growth_review": {
+            "status": "flat", "diagnosis": "No growth was observed.", "next_step": "Check one hypothesis."}})
+        growth = {"status": "ready", "comparison": {"status": "flat"}, "fingerprint": "monthly-new"}
+        with patch("marketer.runner.sufficient", return_value=(False, "insufficient_new_data")), \
+                patch("marketer.runner.Growth.collect", return_value=growth):
+            result = self.runner.run(force=True, publish=False)
+        self.assertEqual(result["status"], "preview_ready")
+        self.runner.model.assert_called_once()
+        self.assertEqual(self.store.get_run(result["run_id"])["data"]["gate"], "new_monthly_purchase_evidence")
+        self.assertEqual(self.source.writes, 0)
+        self.telegram.publish.assert_not_called()
+
     def test_only_known_unsubmitted_connection_is_retried_with_same_id(self):
         analyst = Analyst(self.store, POLICY)
         analyst.rpc = Mock(side_effect=[NotDispatched("connect"), {"payloads": [{"text": '{"ok":true}'}]}])

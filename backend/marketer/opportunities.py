@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from marketer.billing import PURCHASE_GOAL, require_purchase_billing
 from marketer.store import Conflict, digest
+from marketer.growth import notice as growth_notice, assessment_text
 
 
 def review(snapshot, now=None):
@@ -13,6 +14,10 @@ def review(snapshot, now=None):
     now = time.time() if now is None else now
     today = datetime.fromtimestamp(now, ZoneInfo("Europe/Moscow")).date().isoformat()
     rows, future, products, candidates, landings, drift = [], [], [], [], [], []
+    rows.append(growth_notice(snapshot.get("purchase_growth")))
+    diagnosis = assessment_text(snapshot.get("purchase_growth_review"), snapshot.get("knowledge") or {})
+    if diagnosis:
+        rows.append(diagnosis)
     fresh = 0 <= now - snapshot["created"] <= 86400
     assortment = snapshot.get("assortment") or {}
     selections = {(x["campaign_id"], x["ad_id"]): x for x in assortment.get("campaign_selections", [])}
@@ -115,6 +120,7 @@ def review(snapshot, now=None):
         rows.append(f"Гипотеза по посадочной: {cid}, {path[:160]}: {visits:g} визитов, 0 достижений цели покупки в Метрике (lastsign). Проверить мобильный путь от карточки до корзины. Это не доказательство неисправности и не число оплаченных заказов.")
     rows.append("Это разбор возможностей, не применение изменений. Отсутствие автоматической правки не означает, что кампании оптимальны.")
     return {"status": "ready" if fresh else "stale", "run_id": snapshot["run_id"], "text": "\n\n".join(rows),
+            "purchase_growth": snapshot.get("purchase_growth"), "growth_text": rows[0],
             "future_billing_review": future, "opportunities": candidates}
 
 

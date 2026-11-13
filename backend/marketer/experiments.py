@@ -82,6 +82,14 @@ class Experiments:
             ad = self.source.ad(action["ad_id"])
             if any(ad.get("TextAd", {}).get(k) != v for k, v in action["fields"].items()):
                 base["confounders"].append("approved_ad_text_no_longer_current")
+        if action["kind"] == "product_ad_edit" and set(action.get("patch", {})) == {"default_text"}:
+            ad = self.source.ad(action["ad_id"])
+            original = next((a for a in body.get("before", {}).get("ads", []) if a["Id"] == action["ad_id"]), {})
+            shopping = ad.get("ShoppingAd", {})
+            if shopping.get("DefaultTexts") != [action["patch"]["default_text"]]:
+                base["confounders"].append("approved_shopping_text_no_longer_current")
+            if any(shopping.get(k) != original.get("ShoppingAd", {}).get(k) for k in ("FeedId", "FeedFilterConditions")):
+                base["confounders"].append("shopping_feed_or_selection_changed")
         if action["kind"] == "add_negative":
             group = self.source.group(action["ad_group_id"])
             if action["phrase"] not in (group.get("NegativeKeywords") or {}).get("Items", []):
@@ -115,7 +123,8 @@ class Experiments:
             if (row["result"] or {}).get("already_present"):
                 self.store.observe(row["id"], {"status": "not_changed", "conclusion": "Изменение уже существовало; эксперимент не начат."}, final=True)
                 continue
-            if body["action"]["kind"].startswith("product_") and body["action"]["kind"] != "product_launch":
+            copy_test = body["action"]["kind"] == "product_ad_edit" and set(body["action"].get("patch", {})) == {"default_text"}
+            if body["action"]["kind"].startswith("product_") and body["action"]["kind"] != "product_launch" and not copy_test:
                 self.store.observe(row["id"], {"status": "operational_only", "conclusion": "Выполнена настройка, а не эксперимент с продажами."}, final=True)
                 continue
             period = windows(row, self.policy, now)
