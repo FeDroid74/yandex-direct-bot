@@ -81,7 +81,8 @@ def review(store, campaigns=(), baseline_at=None, now=None):
             selection_count += 1
             if len(result["campaign_selections"]) >= 20:
                 continue
-            selection = {"campaign_id": campaign["Id"], "ad_id": ad["Id"], "status": "unknown_filter"}
+            selection = {"campaign_id": campaign["Id"], "ad_id": ad["Id"], "status": "unknown_filter",
+                         "planned_placement": managed["plan"].get("placement_type")}
             filters = shopping.get("FeedFilterConditions")
             filters = filters.get("Items") if isinstance(filters, dict) else filters
             if isinstance(filters, list) and filters and all(isinstance(f, dict) and f.get("Operand") in ("categoryId", "id") and

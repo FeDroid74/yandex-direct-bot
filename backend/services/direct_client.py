@@ -122,10 +122,12 @@ class YandexDirectClient:
         search_enabled = any(value == "YES" for value in search_places.values())
         network_enabled = any(value == "YES" for value in network_places.values())
 
-        if search_enabled and not network_enabled:
+        # An omitted PlacementTypes block on NETWORK_DEFAULT is not a disabled
+        # network. Direct can deliver AD_NETWORK traffic without returning it.
+        if search_enabled and not network_enabled and network_places and all(v == "NO" for v in network_places.values()):
             return cls.PLACEMENT_SEARCH_ONLY
 
-        if network_enabled and not search_enabled:
+        if network_enabled and not search_enabled and search_places and all(v == "NO" for v in search_places.values()):
             return cls.PLACEMENT_NETWORK_ONLY
 
         return cls.PLACEMENT_BOTH

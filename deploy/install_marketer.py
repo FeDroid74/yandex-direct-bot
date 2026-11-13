@@ -23,7 +23,8 @@ def configure_chat(config):
     names = tools.setdefault("alsoAllow", [])
     for tool in ("marketer_knowledge_status", "marketer_knowledge_search", "marketer_status",
                  "marketer_context", "marketer_context_batch", "marketer_proposal", "marketer_memory",
-                 "marketer_experiment", "marketer_assortment"):
+                 "marketer_experiment", "marketer_assortment", "marketer_review",
+                 "marketer_review_card", "marketer_review_refresh"):
         if tool not in names:
             names.append(tool)
     config["channels"]["telegram"]["dmHistoryLimit"] = 16

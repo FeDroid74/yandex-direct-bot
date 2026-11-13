@@ -9,8 +9,10 @@ try {
   const path = join(dir, "config.json");
   writeFileSync(path, JSON.stringify({ owner_id: "42", api_key: "read-test", decision_key: "decision-test" }));
   let command;
+  let hook;
   const registered = [];
-  register({ pluginConfig: { configFile: path }, registerCommand: (c) => { command = c; }, registerTool: (t) => registered.push(t), logger: { info() {} } });
+  register({ pluginConfig: { configFile: path }, registerCommand: (c) => { command = c; }, registerTool: (t) => registered.push(t),
+    on: (name, fn) => { assert.equal(name, "before_prompt_build"); hook = fn; }, logger: { info() {} } });
   let calls = 0;
   let lastBody;
   const navigation = [[{ text: "Next", callback_data: "/yd details abcdef123456 2 3" }]];
@@ -54,7 +56,7 @@ try {
   assert.equal(calls, 3);
   assert.deepEqual(await command.handler({ ...ctx, args: "auto pause" }), { text: "Paused" });
   assert.equal(calls, 4);
-  assert.equal(registered.length, 19);
+  assert.equal(registered.length, 22);
   assert.ok(registered.every((tool) => !/approve|execute|apply/.test(tool.name)));
   globalThis.fetch = async (url, options) => {
     assert.equal(url, "http://127.0.0.1:8092/context");
@@ -69,6 +71,9 @@ try {
     ["marketer_assortment", "/assortment", {}],
     ["marketer_knowledge_status", "/knowledge/status", {}],
     ["marketer_knowledge_search", "/knowledge/search", { query: "purchase" }],
+    ["marketer_review", "/review", {}],
+    ["marketer_review_card", "/review/card", {run_id: "r", key: "k"}],
+    ["marketer_review_refresh", "/review/refresh", {}],
   ]) {
     globalThis.fetch = async (url, options) => {
       assert.equal(url, `http://127.0.0.1:8092${path}`);
@@ -78,6 +83,23 @@ try {
     };
     await registered.find((tool) => tool.name === name).execute("test", params);
   }
+  for (const [args, path] of [["review", "/review"], ["review fresh", "/review/refresh"]]) {
+    globalThis.fetch = async (url, options) => {
+      assert.equal(url, "http://127.0.0.1:8092"+path);
+      assert.equal(options.headers.Authorization, "Bearer read-test");
+      assert.deepEqual(JSON.parse(options.body), {});
+      return {ok:true, json: async () => ({text:"Verified"})};
+    };
+    assert.deepEqual(await command.handler({...ctx, args}), {text:"Verified"});
+  }
+  globalThis.fetch = async (url) => {
+    assert.equal(url, "http://127.0.0.1:8092/review");
+    return {ok:true,json:async()=>({text:"Account facts"})};
+  };
+  const hookCtx = {agentId:"direct",sessionKey:"agent:direct:telegram:direct:42"};
+  assert.match((await hook({prompt:"Что улучшить в кампаниях?"},hookCtx)).prependContext,/Account facts/);
+  assert.equal(await hook({prompt:"Что улучшить?"},{...hookCtx,agentId:"direct-marketer"}),undefined);
+  assert.equal(await hook({prompt:"Добрый день"},hookCtx),undefined);
   console.log("Plugin tests passed: owner validation, paged details, native Telegram buttons, no approval tool exposed.");
 } finally {
   rmSync(dir, { recursive: true });

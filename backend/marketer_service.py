@@ -16,6 +16,7 @@ from marketer.memory import read_memory, read_experiment
 from marketer.assortment import review as assortment_review, baseline_time
 from marketer.knowledge import Knowledge
 from marketer.autonomy import Autonomy
+from marketer.opportunities import review as opportunities, public_review
 
 
 ROOT = Path(__file__).resolve().parent
@@ -88,6 +89,41 @@ def serve():
                     result = Knowledge(store).status()
                 elif self.path == "/knowledge/search":
                     result = {"excerpts": Knowledge(store).search(params["query"])}
+                elif self.path == "/review":
+                    result = public_review(opportunities(store.setting("latest_snapshot")))
+                elif self.path == "/review/card":
+                    snapshot = store.setting("latest_snapshot")
+                    analysis = opportunities(snapshot)
+                    item = next((c for c in analysis["opportunities"] if c["key"] == params.get("key")), None)
+                    if not item or analysis["run_id"] != params.get("run_id"):
+                        raise Conflict("Вариант устарел или не подтверждён. Прочитайте свежий разбор.")
+                    if item["action"]["kind"] == "advisory":
+                        body = actions.prepare({"campaign_id":item["campaign_id"], "area":"experiment",
+                            "title":"Согласовать размещение товарной кампании", "reason":item["reason"],
+                            "action":item["action"], "expected_effect":"Согласованный план будет соответствовать явному решению о каналах.",
+                            "success_metric":"Зафиксирован выбор владельца. Любое изменение в Директе требует отдельной карточки."}, snapshot)
+                    else:
+                        body = actions.prepare({"action": item["action"], "reason": item["reason"]}, None)
+                        ad = next((a for a in body["before"]["ads"] if a["Id"] == item["action"]["ad_id"]), None)
+                        if not ad or ad.get("ShoppingAd", {}).get("DefaultTexts") != [item["before"]]:
+                            raise Conflict("Текст изменился после снимка. Обновите разбор.")
+                    row, fresh = store.create(body)
+                    if fresh:
+                        telegram.publish(row, store)
+                    checked = store.get(row["id"])
+                    result = {k: checked[k] for k in ("id","revision","state","delivery")}
+                elif self.path == "/review/refresh":
+                    if params:
+                        raise ValueError("Review refresh does not accept execution flags")
+                    if not run_lock.acquire(blocking=False):
+                        raise Conflict("Уже выполняется сбор или анализ; второй проход не запущен.")
+                    def read_only_review():
+                        try:
+                            runner.requested_review()
+                        finally:
+                            run_lock.release()
+                    threading.Thread(target=read_only_review, daemon=True).start()
+                    result = {"status": "started", "text": "Запущен разбор без изменений рекламы. Результат придёт в Telegram."}
                 elif self.path == "/autonomy/control":
                     if str(params.get("sender_id")) != str(config["owner_id"]) or params.get("channel") != "telegram":
                         raise PermissionError("Only the Telegram owner may control autonomy")

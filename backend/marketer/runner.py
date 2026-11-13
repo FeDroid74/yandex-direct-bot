@@ -17,6 +17,7 @@ from marketer.experiments import Experiments
 from marketer.assortment import review as assortment_review, baseline_time
 from marketer.knowledge import Knowledge
 from marketer.autonomy import Autonomy
+from marketer.opportunities import review as opportunity_review
 from marketer.telegram import summary, action_text
 
 
@@ -254,8 +255,16 @@ class Runner:
         if any(not isinstance(p, dict) for p in result["proposals"]):
             raise ValueError("Invalid proposal object")
         if any(not isinstance(p.get("action"), dict) or p["action"].get("kind") not in
-               {"add_negative", "ad_text", "strategy_value", "advisory"} for p in result["proposals"]):
+               {"add_negative", "ad_text", "strategy_value", "advisory", "product_ad_edit"} for p in result["proposals"]):
             raise ValueError("Weekly analysis cannot create, launch, or stop campaigns")
+        for raw in result["proposals"]:
+            a = raw["action"]
+            if a["kind"] == "product_ad_edit" and (
+                set(a) != {"kind","campaign_id","ad_id","patch"} or a["campaign_id"] != raw.get("campaign_id")
+                or type(a["ad_id"]) is not int or not isinstance(a["patch"], dict)
+                or set(a["patch"]) != {"default_text"} or not isinstance(a["patch"]["default_text"], str)
+                or not 1 <= len(a["patch"]["default_text"].strip()) <= 81):
+                raise ValueError("ShoppingAd review may suggest only one fallback text for its own campaign")
         if not isinstance(result.get("summary"), str) or len(result["summary"]) > 2500:
             raise ValueError("Invalid analyst summary")
         if self.context_size(result) > 35000:
@@ -273,6 +282,40 @@ class Runner:
 
     def evaluations(self):
         Experiments(self.store, self.source, self.telegram, self.policy).run()
+
+    def requested_review(self):
+        """A user-requested read-only run has its own delivery, even on a data gate."""
+        try:
+            result = self.run(force=True, publish=False)
+            run = self.store.get_run(result["run_id"])
+            data = run["data"]
+            message = opportunity_review(data["snapshot"])["text"]
+            if run["status"] == "preview_ready":
+                blocked = data.get("rejected", [])
+                counts = (f"Предварительный разбор: прошли проверку {data.get('prepared_count', 0)}; "
+                          f"не прошли {len(blocked)}. Карточки из этого разбора не отправлялись, реклама не менялась.")
+                if blocked:
+                    counts += " Не прошли проверку: " + "; ".join(summary(row["title"], 120) for row in blocked[:3]) + "."
+                message = counts + "\n\n" + message
+                if data.get("summary") and not blocked:
+                    message += "\n\nМнение аналитика, не результат применения: " + summary(data["summary"], 850)
+            elif run["status"] == "skipped":
+                message += "\n\nНовый вызов модели не требовался: недостаточно новых зрелых данных."
+        except Exception as exc:
+            current_id = getattr(exc, "analysis_run_id", None)
+            run = self.store.get_run(current_id) if current_id else None
+            if not run or run["data"].get("stage") != "analysis" or not run["data"].get("snapshot"):
+                self.notify_once("requested_review_error", "Запрошенный разбор не завершён; рекламу он не меняет. " + safe_error(exc, 350))
+                return
+            message = ("Модель не завершила разбор; её предложения не использованы. Проверенные данные этого запроса:\n\n"
+                       + opportunity_review(run["data"]["snapshot"])["text"])
+        key = "requested_review_notice:" + run["id"]
+        self.store.set_setting(key, {"delivery":"uncertain"})
+        try:
+            sent = self.telegram.notify(message[:3900])
+        except Exception:
+            return
+        self.store.set_setting(key, {"delivery":"sent", "message_id": (sent or {}).get("message_id")})
 
     def run(self, force=False, collect_only=False, scheduled=False, resume_run_id=None, publish=True):
         last = self.store.setting("last_attempt", 0)
@@ -412,20 +455,22 @@ class Runner:
             self.store.save_run(run_id, "complete", {"snapshot": snapshot, "summary": analysis.get("summary"), "coverage": analysis.get("coverage"),
                                                      "published": published, "rejected": rejected, "model_called": True,
                                                      "stage": "finished", "completed_at": time.time(), "error": None})
-            if self.policy.get("autonomy", {}).get("enabled") and (not light or published):
-                self.completion_notice(run_id, snapshot, analysis, published)
+            if weekly or (self.policy.get("autonomy", {}).get("enabled") and (not light or published)):
+                self.completion_notice(run_id, snapshot, analysis, published, rejected)
             return {"status": "complete", "run_id": run_id, "published": published, "rejected": rejected}
         except Exception as exc:
             error = safe_error(exc)
+            exc.analysis_run_id = run_id
             self.store.save_run(run_id, "failed", {"error": error, "stage": stage})
             if publish:
                 try:
-                    self.notify_once("run_error", "Автономный анализ не завершён. Прогресс и результаты операций сохранены. Перед повтором требуется сверка; выполненные действия не повторяются автоматически.\n" + error)
+                    report = ("\n\n" + opportunity_review(snapshot)["text"]) if stage == "analysis" else ""
+                    self.notify_once("run_error", "Анализ не завершён. Прогресс сохранён; неподтверждённые решения не применяются.\n" + error[:350] + report)
                 except Exception as notification_error:
                     self.store.save_run(run_id, "failed", {"notification_error": safe_error(notification_error)})
             raise
 
-    def completion_notice(self, run_id, snapshot, analysis, published):
+    def completion_notice(self, run_id, snapshot, analysis, published, rejected=()):
         key = "completion_notice:"+run_id
         if self.store.setting(key):
             return
@@ -445,12 +490,20 @@ class Runner:
         elif uncertain:
             parts.append("Подтверждённых автоматических изменений нет; результат попытки требуется сверить.")
         else:
-            parts.append("Автоматических изменений нет: подходящих проверенных действий не было.")
+            parts.append("Автоматических изменений не применено.")
+        if snapshot.get("review_kind") != "light":
+            other = opportunity_review(snapshot)
+            if other["opportunities"]:
+                item = other["opportunities"][0]
+                parts.append("Отдельно для вашего решения: "+item["reason"]+(" Вариант после проверки: «"+item["after"]+"»." if item.get("after") else ""))
         if pending:
             parts.append(f"На отдельное решение оставлено: {len(pending)}. Карточки отправлены отдельно.")
         if uncertain:
             parts.append("Есть операция с неизвестным результатом. Автозаписи остановлены до сверки; повтора не будет.")
-        parts.append(summary(analysis.get("summary", ""), 1500))
+        if rejected:
+            parts.append("Не прошли проверку: " + "; ".join(summary(row["title"], 150) for row in rejected[:4]) + ". Эти варианты не применены.")
+        else:
+            parts.append(summary(analysis.get("summary", ""), 1500))
         parts.append("Автоматический режим не меняет цель покупки и способ оплаты. Достижение цели не подтверждает оплату заказа.")
         message = summary("\n\n".join(parts), 3900)
         self.store.set_setting(key, {"delivery": "uncertain", "at": time.time()})

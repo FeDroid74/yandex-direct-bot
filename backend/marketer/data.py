@@ -287,7 +287,9 @@ class DataSource:
                 c["ads"] = self.entities("ads", "Ads", {"SelectionCriteria": {"CampaignIds": [cid]}, "FieldNames": ["Id", "AdGroupId", "CampaignId", "State", "Status", "Type"], "TextAdFieldNames": ["Title", "Title2", "Text", "Href", "AdImageHash"], "ShoppingAdFieldNames": ["FeedId", "DefaultTexts", "FeedFilterConditions"]}, allow_empty_result=True)
                 c["queries"] = self.report(cid, split.isoformat(), end.isoformat(), "SEARCH_QUERY_PERFORMANCE_REPORT", ["CampaignId", "AdGroupId", "Query"], goal_id, attribution, goals) if c["placement"] != "network_only" else []
                 c["ad_performance"] = self.report(cid, split.isoformat(), end.isoformat(), "AD_PERFORMANCE_REPORT", ["AdId", "AdGroupId", "CampaignId", "AdNetworkType"], goal_id, attribution, goals)
-                c["placements"] = self.report(cid, split.isoformat(), end.isoformat(), "CUSTOM_REPORT", ["CampaignId", "AdNetworkType", "Placement"], goal_id, attribution, goals) if c["placement"] != "search_only" else []
+                observed_network = any(row.get("AdNetworkType") == "AD_NETWORK" and
+                                       (row.get("Impressions") or row.get("Clicks")) for row in c["ad_performance"])
+                c["placements"] = self.report(cid, split.isoformat(), end.isoformat(), "CUSTOM_REPORT", ["CampaignId", "AdNetworkType", "Placement"], goal_id, attribution, goals) if observed_network or c["placement"] != "search_only" else []
                 c["metrika_errors"] = []
                 c["metrika_periods"] = {}
                 for period, (period_start, period_end) in periods.items():

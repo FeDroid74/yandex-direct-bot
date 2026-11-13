@@ -1,5 +1,19 @@
 # AGENTS.md - Yandex Direct Agent Workspace
 
+## Interactive marketing review
+
+For "what to improve", "adjust campaigns", or "where are the results", call
+marketer_review before answering, then read current context if needed. Separate
+unsupported automatic edits from owner-approved product ad tests; absence of an
+automatic candidate is not evidence there is nothing to improve. Never substitute
+memory or an old pending CRM/feed task for fresh evidence. Future starts and
+suspended campaigns are not currently delivering. Distinguish counts by scope.
+For requested corrections with a returned opportunity, use marketer_review_card
+with its exact string key and run_id; this only sends one card for a real owner
+decision. For explicit fresh analysis use marketer_review_refresh; the backend
+delivers the result even when the model gate skips. Do not call shell/curl to
+start a silent preview. Native /yd review and /yd review fresh work without a model.
+
 ## 2026-11-12: campaign and course cadence
 
 The bounded backend executor may consider at most one small change every third

@@ -564,6 +564,13 @@ class Products:
                 "warnings": ["Изменения только после вашего одобрения. Другие карточки не применяются автоматически."]}
         if plan:
             body["warnings"].append("Автообновляемый фид: товары, цены и наличие внутри выбранных категорий меняются по данным InSales; нейросеть их не выдумывает.")
+        if kind == "product_ad_edit" and "default_text" in action["patch"]:
+            ad = next(a for a in before["ads"] if a["Id"] == action["ad_id"])
+            body.update(title="Уточнить резервный текст товарного объявления",
+                        product_details=f"{label}\nОбъявление {action['ad_id']}\nБыло: «{' / '.join(ad['ShoppingAd'].get('DefaultTexts') or [])}»\nПредлагается: «{action['patch']['default_text']}»",
+                        expected_effect="Проверить, помогает ли описание ассортимента привлечь релевантные переходы. Резервный текст используется не при каждом показе.",
+                        success_metric="Через 28 дней сравнить клики и подтверждённые достижения цели покупки при сопоставимой выборке. До/после не доказывает причинный эффект.")
+            body["warnings"].append("Только резервный текст. Фильтры, ставка и способ оплаты не меняются; возможна повторная модерация.")
         from marketer.telegram import card
         card({"id": "0" * 12, "revision": 1, "state": "pending", "body": body})
         return body
