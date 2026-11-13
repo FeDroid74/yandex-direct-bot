@@ -1,4 +1,4 @@
-"""Register the supported replacement for the retired ChatGPT-login model.
+"""Register the owner-selected ChatGPT-login model, preserving unrelated agents.
 
 Only the isolated analyst is changed initially. --direct also repairs the Direct
 agent after the analyst smoke test passes. Unrelated agents remain unchanged.
@@ -10,19 +10,26 @@ from pathlib import Path
 from install_marketer import private_json
 
 
-home = Path.home()
-path = home/".openclaw/openclaw.json"
-config = json.loads(path.read_text())
-model_id = "gpt-5.6-terra"
-ref = "openai-codex/"+model_id
-providers = config.setdefault("models", {}).setdefault("providers", {})
-provider = providers.setdefault("openai-codex", {"baseUrl": "https://chatgpt.com/backend-api", "api": "openai-codex-responses", "auth": "oauth", "models": []})
-if not any(m.get("id") == model_id for m in provider["models"]):
-    provider["models"].append({"id": model_id, "name": "GPT-5.6 Terra", "api": "openai-codex-responses", "reasoning": True,
-                                "input": ["text", "image"], "contextWindow": 128000, "maxTokens": 16000})
-config["agents"]["defaults"].setdefault("models", {})[ref] = {}
-for agent in config["agents"]["list"]:
-    if agent["id"] == "direct-marketer" or ("--direct" in sys.argv and agent["id"] == "direct"):
-        agent["model"] = ref
-private_json(path, config)
-print("Configured", ref, "for analyst" + (" and Direct agent" if "--direct" in sys.argv else " only"))
+MODEL_ID = "gpt-6.1-sol"
+MODEL_REF = "openai-codex/" + MODEL_ID
+
+
+def configure(config, include_direct=False):
+    provider = config.setdefault("models", {}).setdefault("providers", {}).setdefault("openai-codex", {
+        "baseUrl": "https://chatgpt.com/backend-api", "api": "openai-codex-responses", "auth": "oauth", "models": []})
+    if not any(m.get("id") == MODEL_ID for m in provider["models"]):
+        # Keep the existing integration caps, not the model's advertised maximum.
+        provider["models"].append({"id": MODEL_ID, "name": "GPT-6.1 Sol", "api": "openai-codex-responses", "reasoning": True,
+                                    "input": ["text", "image"], "contextWindow": 128000, "maxTokens": 16000})
+    config["agents"]["defaults"].setdefault("models", {}).setdefault(MODEL_REF, {})
+    for agent in config["agents"]["list"]:
+        if agent["id"] == "direct-marketer" or (include_direct and agent["id"] == "direct"):
+            agent["model"] = MODEL_REF
+
+
+if __name__ == "__main__":
+    path = Path.home()/".openclaw/openclaw.json"
+    config = json.loads(path.read_text())
+    configure(config, include_direct="--direct" in sys.argv)
+    private_json(path, config)
+    print("Configured", MODEL_REF, "for analyst" + (" and Direct agent" if "--direct" in sys.argv else " only"))
